@@ -1,0 +1,31 @@
+<template>
+    <lightning-card title="My Engagements — Burn Status" icon-name="utility:trending">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+            <template lwc:if={hasRows}>
+                <lightning-datatable
+                    key-field="engagementId"
+                    columns={columns}
+                    data={rows}
+                    hide-checkbox-column
+                    onrowaction={handleRowAction}
+                    column-widths-mode="auto">
+                </lightning-datatable>
+                <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
+                    Active engagements where you are Engagement Manager (owner or Delivery Actor).
+                    Revenue at risk is T&amp;M only; fixed-bid rows are a margin/utilization view. Read-only.
+                </p>
+            </template>
+
+            <template lwc:if={error}>
+                <p class="slds-text-color_error">Unable to load portfolio.</p>
+            </template>
+
+            <template lwc:if={rows}>
+                <template lwc:if={hasRows}></template>
+                <template lwc:else>
+                    <p class="slds-text-body_regular slds-text-color_weak">No active engagements where you are Engagement Manager.</p>
+                </template>
+            </template>
+        </div>
+    </lightning-card>
+</template>

@@ -1,0 +1,30 @@
+<template>
+    <lightning-card title="Burn & Forecast-Accuracy" icon-name="utility:trending">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+            <template lwc:if={summary}>
+                <p class="slds-text-body_regular slds-m-bottom_small">{headline}</p>
+            </template>
+
+            <template lwc:if={hasData}>
+                <lightning-datatable
+                    key-field="resource"
+                    columns={columns}
+                    data={data}
+                    hide-checkbox-column
+                    column-widths-mode="auto">
+                </lightning-datatable>
+            </template>
+
+            <template lwc:if={error}>
+                <p class="slds-text-color_error">Unable to load burn data.</p>
+            </template>
+
+            <template lwc:if={summary}>
+                <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
+                    Hours consumed is a proxy for progress, not a verified measure of delivered scope.
+                    Read-only pulse check — not the system of record.
+                </p>
+            </template>
+        </div>
+    </lightning-card>
+</template>
