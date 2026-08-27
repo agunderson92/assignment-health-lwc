@@ -47,6 +47,8 @@ public with sharing class EngagementBurnController {
     public class EngagementBurn {
         @AuraEnabled public Id      engagementId;
         @AuraEnabled public String  name;
+        @AuraEnabled public String  accountName;   // client account (leadership view)
+        @AuraEnabled public String  managerName;   // engagement owner (leadership view)
         @AuraEnabled public String  status;
         @AuraEnabled public String  model;
         @AuraEnabled public Decimal pctConsumed;
@@ -81,6 +83,82 @@ public with sharing class EngagementBurnController {
         return out;
     }
 
+    // ===================== Leadership (all engagements, filtered + paged) =====================
+
+    public class PagedEngagements {
+        @AuraEnabled public List<EngagementBurn> rows;
+        @AuraEnabled public Integer pageNumber;
+        @AuraEnabled public Integer pageSize;
+        @AuraEnabled public Integer totalCount;
+        @AuraEnabled public Integer totalPages;
+    }
+
+    private static final Integer MAX_PAGE_SIZE = 50;
+    private static final Integer MAX_OFFSET    = 2000; // SOQL OFFSET hard limit
+
+    /**
+     * Leadership LWC: all active engagements, optionally filtered by manager and/or account,
+     * one page at a time. Burn is computed only for the engagements on the requested page, so
+     * the cost is bounded regardless of how many active engagements exist org-wide.
+     *
+     * Ordering is by soonest expected end date (most time-sensitive first) for stable paging;
+     * the returned page is then sorted worst-first so risk surfaces within the page.
+     */
+    @AuraEnabled(cacheable=true)
+    public static PagedEngagements getEngagementsPage(
+        Id managerUserId, Id accountId, Integer pageSize, Integer pageNumber
+    ) {
+        Date today = Date.today();
+        Set<String> statuses = ACTIVE_FORECAST_STATUS; // local bind for dynamic SOQL
+        Integer sz = (pageSize == null || pageSize <= 0) ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
+        Integer pg = (pageNumber == null || pageNumber < 1) ? 1 : pageNumber;
+
+        PagedEngagements out = new PagedEngagements();
+        out.pageSize = sz;
+        out.pageNumber = pg;
+        out.rows = new List<EngagementBurn>();
+
+        // Manager filter -> restrict to that manager's engagement Ids (owner OR EM delivery actor)
+        Set<Id> mgrIds;
+        if (managerUserId != null) {
+            mgrIds = activeEngagementIdsForEm(managerUserId);
+            if (mgrIds.isEmpty()) {
+                out.totalCount = 0;
+                out.totalPages = 0;
+                return out;
+            }
+        }
+
+        String whereClause =
+            'KimbleOne__ExpectedStartDate__c <= :today '
+          + 'AND KimbleOne__ExpectedEndDate__c > :today '
+          + 'AND KimbleOne__ForecastStatus__r.Name IN :statuses';
+        if (accountId != null) whereClause += ' AND KimbleOne__Account__c = :accountId';
+        if (mgrIds != null)    whereClause += ' AND Id IN :mgrIds';
+
+        out.totalCount = Database.countQuery(
+            'SELECT COUNT() FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause);
+        out.totalPages = (out.totalCount + sz - 1) / sz;
+
+        Integer offsetRows = (pg - 1) * sz;
+        if (out.totalCount == 0 || offsetRows >= out.totalCount || offsetRows > MAX_OFFSET) {
+            return out; // nothing to show on this page (or paged past the SOQL offset ceiling)
+        }
+
+        List<KimbleOne__DeliveryGroup__c> pageGrps = Database.query(
+            'SELECT Id FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause
+          + ' ORDER BY KimbleOne__ExpectedEndDate__c ASC NULLS LAST, Name ASC'
+          + ' LIMIT :sz OFFSET :offsetRows');
+
+        Set<Id> pageIds = new Map<Id, SObject>(pageGrps).keySet();
+        Map<Id, EngagementBurn> byGrp = buildForGroups(pageIds, false);
+
+        List<EngagementBurn> rows = byGrp.values();
+        rows.sort(new WorstFirst());
+        out.rows = rows;
+        return out;
+    }
+
     // ===================== Core builder =====================
 
     private static Map<Id, EngagementBurn> buildForGroups(Set<Id> grpIds, Boolean includeAssignments) {
@@ -90,7 +168,7 @@ public with sharing class EngagementBurnController {
 
         // Engagement headers
         Map<Id, KimbleOne__DeliveryGroup__c> grps = new Map<Id, KimbleOne__DeliveryGroup__c>([
-            SELECT Id, Name, On_Hold__c
+            SELECT Id, Name, On_Hold__c, KimbleOne__Account__r.Name, Owner.Name
             FROM KimbleOne__DeliveryGroup__c
             WHERE Id IN :grpIds
         ]);
@@ -124,12 +202,35 @@ public with sharing class EngagementBurnController {
             }
         }
 
+        return assemble(grpIds, grps, asgs, recentHrs, includeAssignments, today);
+    }
+
+    /**
+     * Pure in-memory assembly of the engagement rollups from already-queried data.
+     * Split out from the SOQL so the classification/rollup logic is unit-testable
+     * without inserting managed-package records. Referenced by tests via @TestVisible.
+     */
+    @TestVisible
+    private static Map<Id, EngagementBurn> assemble(
+        Set<Id> grpIds,
+        Map<Id, KimbleOne__DeliveryGroup__c> grps,
+        List<KimbleOne__ActivityAssignment__c> asgs,
+        Map<Id, Decimal> recentHrs,
+        Boolean includeAssignments,
+        Date today
+    ) {
+        Map<Id, EngagementBurn> result = new Map<Id, EngagementBurn>();
+        if (recentHrs == null) recentHrs = new Map<Id, Decimal>();
+
         // Seed engagement wrappers
         for (Id gid : grpIds) {
             if (!grps.containsKey(gid)) continue;
+            KimbleOne__DeliveryGroup__c g = grps.get(gid);
             EngagementBurn e = new EngagementBurn();
             e.engagementId = gid;
-            e.name = grps.get(gid).Name;
+            e.name = g.Name;
+            e.accountName = g.KimbleOne__Account__r != null ? g.KimbleOne__Account__r.Name : null;
+            e.managerName = g.Owner != null ? g.Owner.Name : null;
             e.assignments = new List<AssignmentBurn>();
             e.forecast = 0; e.worked = 0; e.runRate = 0;
             e.projUndeliveredHrs = 0; e.revenueAtRisk = 0;
@@ -140,6 +241,8 @@ public with sharing class EngagementBurnController {
         // Track worst child + forecast-weighted %complete numerator per engagement
         Map<Id, Decimal> completeNumer = new Map<Id, Decimal>();
         Map<Id, String> worstStatus = new Map<Id, String>();
+        // Distinct revenue models seen per engagement (for the engagement-level rollup)
+        Map<Id, Set<String>> modelsByGrp = new Map<Id, Set<String>>();
 
         for (KimbleOne__ActivityAssignment__c a : asgs) {
             EngagementBurn e = result.get(a.KimbleOne__DeliveryGroup__c);
@@ -167,12 +270,21 @@ public with sharing class EngagementBurnController {
                 worstStatus.put(e.engagementId, worseOf(cur, b.status));
             }
 
+            // collect the revenue models present on this engagement's assignments
+            if (b.model != null && b.model != 'Other') {
+                if (!modelsByGrp.containsKey(e.engagementId)) {
+                    modelsByGrp.put(e.engagementId, new Set<String>());
+                }
+                modelsByGrp.get(e.engagementId).add(b.model);
+            }
+
             if (includeAssignments) e.assignments.add(b);
         }
 
         // Finalize engagement rollups
         for (EngagementBurn e : result.values()) {
             e.resourceCount = e.assignments != null ? e.assignments.size() : null;
+            e.model = rollupModel(modelsByGrp.get(e.engagementId));
             e.pctConsumed = e.forecast > 0 ? (e.worked / e.forecast * 100).setScale(1) : null;
             e.pctComplete = e.forecast > 0 && completeNumer.containsKey(e.engagementId)
                 ? (completeNumer.get(e.engagementId) / e.forecast).setScale(1) : null;
@@ -188,6 +300,7 @@ public with sharing class EngagementBurnController {
 
     // ===================== Per-assignment math + classification =====================
 
+    @TestVisible
     private static AssignmentBurn computeAssignment(
         KimbleOne__ActivityAssignment__c a, Decimal recent42, Boolean paused, Date today
     ) {
@@ -231,6 +344,7 @@ public with sharing class EngagementBurnController {
         return b;
     }
 
+    @TestVisible
     private static String classify(
         AssignmentBurn b, Boolean paused, Decimal weeksElapsed, Decimal projConsumptionPct
     ) {
@@ -275,6 +389,7 @@ public with sharing class EngagementBurnController {
 
     private static Decimal nz(Decimal d) { return d == null ? 0 : d; }
 
+    @TestVisible
     private static String mapModel(KimbleOne__ActivityAssignment__c a) {
         String gen;
         try {
@@ -290,7 +405,16 @@ public with sharing class EngagementBurnController {
         return 'Other';
     }
 
+    /** Roll the distinct per-assignment models up to a single engagement-level label. */
+    @TestVisible
+    private static String rollupModel(Set<String> models) {
+        if (models == null || models.isEmpty()) return null;
+        if (models.size() == 1) return new List<String>(models)[0];
+        return 'Mixed';
+    }
+
     // severity ordering for status rollups
+    @TestVisible
     private static Integer sev(String s) {
         if (s == 'At risk') return 4;
         if (s == 'Watch' || s == 'Verify' || s == 'Monitor') return 3;

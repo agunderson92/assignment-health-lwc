@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Engagement Burn Access</label>
+    <description>Grants access to the Engagement Burn LWCs' Apex controller (read-only burn / forecast-accuracy analysis). Assign to Engagement Managers who need the record-page panel and Home-page portfolio component.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <classAccesses>
+        <apexClass>EngagementBurnController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+</PermissionSet>

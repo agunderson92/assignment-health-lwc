@@ -1,0 +1,75 @@
+<template>
+    <lightning-card title="Engagement Burn — All Engagements" icon-name="utility:trending">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+
+            <!-- Filters -->
+            <div class="slds-grid slds-gutters slds-grid_vertical-align-end slds-wrap slds-m-bottom_small">
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_5-of-12">
+                    <lightning-record-picker
+                        label="Account"
+                        placeholder="Filter by account…"
+                        object-api-name="Account"
+                        onchange={handleAccountChange}>
+                    </lightning-record-picker>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_5-of-12">
+                    <lightning-record-picker
+                        label="Engagement Manager"
+                        placeholder="Filter by manager…"
+                        object-api-name="User"
+                        onchange={handleManagerChange}>
+                    </lightning-record-picker>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_2-of-12">
+                    <lightning-button label="Clear" onclick={handleClear} variant="neutral"></lightning-button>
+                </div>
+            </div>
+
+            <template lwc:if={loading}>
+                <lightning-spinner alternative-text="Loading engagements" size="small"></lightning-spinner>
+            </template>
+
+            <template lwc:if={hasRows}>
+                <lightning-datatable
+                    key-field="engagementId"
+                    columns={columns}
+                    data={rows}
+                    hide-checkbox-column
+                    onrowaction={handleRowAction}
+                    column-widths-mode="auto">
+                </lightning-datatable>
+
+                <!-- Pager -->
+                <div class="slds-grid slds-grid_align-spread slds-grid_vertical-align-center slds-m-top_small">
+                    <lightning-button
+                        label="Previous"
+                        icon-name="utility:chevronleft"
+                        disabled={isFirstPage}
+                        onclick={handlePrev}>
+                    </lightning-button>
+                    <span class="slds-text-body_small slds-text-color_weak">{pageLabel}</span>
+                    <lightning-button
+                        label="Next"
+                        icon-name="utility:chevronright"
+                        icon-position="right"
+                        disabled={isLastPage}
+                        onclick={handleNext}>
+                    </lightning-button>
+                </div>
+
+                <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
+                    All active engagements, ordered by soonest expected end date; each page is sorted worst-first.
+                    Revenue at risk is T&amp;M only; fixed-bid rows are a margin/utilization view. Read-only.
+                </p>
+            </template>
+
+            <template lwc:if={error}>
+                <p class="slds-text-color_error">Unable to load engagements.</p>
+            </template>
+
+            <template lwc:if={showEmpty}>
+                <p class="slds-text-body_regular slds-text-color_weak">No active engagements match these filters.</p>
+            </template>
+        </div>
+    </lightning-card>
+</template>

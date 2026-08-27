@@ -1,0 +1,9 @@
+# Local CLI state
+.sfdx/**
+.localdevserver/**
+
+# Editor / OS
+**/.DS_Store
+**/*.log
+**/jsconfig.json
+**/.eslintrc.json

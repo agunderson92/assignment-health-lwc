@@ -9,11 +9,17 @@ starting point, not production-ready — see "Before production" below.
 
 ## What's here
 
-- `classes/EngagementBurnController.cls` — read-only Apex. Two `@AuraEnabled(cacheable=true)` methods:
+- `classes/EngagementBurnController.cls` — read-only Apex. Three `@AuraEnabled(cacheable=true)` methods:
   - `getEngagementBurn(engagementId)` → one engagement + its assignment detail (for the record page).
   - `getMyPortfolio()` → the logged-in user's active engagements where they are EM, worst-first (rollup).
+  - `getEngagementsPage(managerUserId, accountId, pageSize, pageNumber)` → **all** active engagements, optionally filtered by manager and/or account, one page at a time (leadership view). Returns a `PagedEngagements` wrapper (`rows`, `totalCount`, `totalPages`, `pageNumber`, `pageSize`).
 - `lwc/engagementBurnPanel/` — drops on the **Engagement (`KimbleOne__DeliveryGroup__c`) record page**. Shows the burn-to-date + projection table for that engagement.
 - `lwc/myPortfolioBurn/` — drops on the **Home page** (or an App page). Shows the EM's active engagements, worst-first, each row navigates to the engagement.
+- `lwc/allEngagementsBurn/` — drops on a **Home or App page for leadership**. Shows all active engagements with Account + Manager columns, filterable by Account and Engagement Manager (`lightning-record-picker`), paginated (20/page). Each row navigates to the engagement.
+
+### Leadership paging / ordering design
+
+`getEngagementsPage` computes burn **only for the engagements on the requested page**, so cost stays bounded no matter how many active engagements exist org-wide (this business runs hundreds of small T&E engagements). The trade-off: rows are ordered by soonest expected end date at the SOQL level (stable, pageable) and only the returned page is sorted worst-first — so a globally worst-first ranking across *all* pages is **not** available in this synchronous design (that would require computing every engagement's burn up front). Narrow with the Account / Manager filters to focus. A future enhancement could pre-rank via a scheduled/cached job if global worst-first ordering is needed. `OFFSET` is capped at 2000 (SOQL limit) — deep paging past that returns empty; filter instead.
 
 ## How it maps to the methodology
 
