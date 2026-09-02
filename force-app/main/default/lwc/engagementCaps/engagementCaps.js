@@ -1,40 +1,42 @@
-import { LightningElement, wire } from 'lwc';
+import { LightningElement, api, wire } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
-import getMyPortfolio from '@salesforce/apex/EngagementBurnController.getMyPortfolio';
+import getEngagementCaps from '@salesforce/apex/EngagementBurnController.getEngagementCaps';
 
 const COLUMNS = [
-    { label: 'Engagement', fieldName: 'name', wrapText: true, sortable: true,
+    { label: 'Element', fieldName: 'elementName', wrapText: true, sortable: true },
+    { label: 'Activity', fieldName: 'activityName', wrapText: true, sortable: true,
       cellAttributes: { class: { fieldName: 'statusClass' } } },
-    { label: 'Model', fieldName: 'model', fixedWidth: 90, sortable: true },
-    { label: '% Cons.', fieldName: 'pctConsumed', type: 'number', sortable: true,
+    { label: 'Cap', fieldName: 'cap', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: 'Consumed', fieldName: 'consumed', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: '% of cap cons.', fieldName: 'consumedPct', type: 'number', sortable: true,
       typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: '% Elap.', fieldName: 'pctComplete', type: 'number', sortable: true,
+    { label: 'Forecast', fieldName: 'forecast', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: '% of cap fcst.', fieldName: 'forecastPct', type: 'number', sortable: true,
       typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: 'Worked', fieldName: 'worked', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Forecast', fieldName: 'forecast', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Run-rate', fieldName: 'runRate', type: 'number', sortable: true,
-      typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: 'Proj. undel. (hr)', fieldName: 'projUndeliveredHrs', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Rev. at risk', fieldName: 'revenueAtRisk', type: 'currency', sortable: true,
+    { label: 'Projected overage', fieldName: 'overage', type: 'currency', sortable: true,
       typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
     { label: 'Status', fieldName: 'status', sortable: true, cellAttributes: { class: { fieldName: 'statusClass' } } },
     { type: 'button-icon', fixedWidth: 40,
-      typeAttributes: { iconName: 'utility:new_window', title: 'Open in new tab', name: 'open', variant: 'bare' } }
+      typeAttributes: { iconName: 'utility:new_window', title: 'Open activity in new tab', name: 'open', variant: 'bare' } }
 ];
 
-export default class MyPortfolioBurn extends NavigationMixin(LightningElement) {
+export default class EngagementCaps extends NavigationMixin(LightningElement) {
+    @api recordId;
     columns = COLUMNS;
     rows;
     error;
 
-    // Default: highest revenue at risk first
-    sortedBy = 'revenueAtRisk';
+    // Default: highest projected % of cap first
+    sortedBy = 'forecastPct';
     sortDirection = 'desc';
 
-    @wire(getMyPortfolio)
+    @wire(getEngagementCaps, { engagementId: '$recordId' })
     wired({ data, error }) {
         if (data) {
-            const mapped = data.map((e) => ({ ...e, statusClass: this.statusClass(e.status) }));
+            const mapped = data.map((c) => ({ ...c, statusClass: this.statusClass(c.status) }));
             this.rows = sortData(mapped, this.sortedBy, this.sortDirection);
             this.error = undefined;
         } else if (error) {
@@ -44,9 +46,10 @@ export default class MyPortfolioBurn extends NavigationMixin(LightningElement) {
 
     statusClass(status) {
         switch (status) {
-            case 'On track': return 'slds-text-color_success';
+            case 'Over cap': return 'slds-text-color_error';
             case 'At risk':  return 'slds-text-color_error';
-            default:         return 'slds-text-color_warning';
+            case 'On track': return 'slds-text-color_success';
+            default:         return 'slds-text-color_warning'; // Watch / Under-running
         }
     }
 
@@ -57,16 +60,17 @@ export default class MyPortfolioBurn extends NavigationMixin(LightningElement) {
     }
 
     handleRowAction(event) {
-        const id = event.detail.row.engagementId;
+        const id = event.detail.row.activityId;
         this[NavigationMixin.GenerateUrl]({
             type: 'standard__recordPage',
-            attributes: { recordId: id, objectApiName: 'KimbleOne__DeliveryGroup__c', actionName: 'view' }
+            attributes: { recordId: id, objectApiName: 'KimbleOne__ResourcedActivity__c', actionName: 'view' }
         }).then((url) => {
             window.open(url, '_blank');
         });
     }
 
     get hasRows() { return this.rows && this.rows.length > 0; }
+    get showEmpty() { return this.rows && this.rows.length === 0; }
 }
 
 /** Stable client-side sort; nulls always sort last regardless of direction. */

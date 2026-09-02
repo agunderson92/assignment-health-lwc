@@ -1,5 +1,5 @@
 <template>
-    <lightning-card title="Engagement Burn — All Engagements" icon-name="utility:trending">
+    <lightning-card title="Revenue Cap Burndown — Capped Activities" icon-name="utility:money">
         <div class="slds-p-horizontal_medium slds-p-bottom_medium">
 
             <!-- Filters -->
@@ -26,12 +26,12 @@
             </div>
 
             <template lwc:if={loading}>
-                <lightning-spinner alternative-text="Loading engagements" size="small"></lightning-spinner>
+                <lightning-spinner alternative-text="Loading capped activities" size="small"></lightning-spinner>
             </template>
 
             <template lwc:if={hasRows}>
                 <lightning-datatable
-                    key-field="engagementId"
+                    key-field="activityId"
                     columns={columns}
                     data={rows}
                     hide-checkbox-column
@@ -61,17 +61,17 @@
                 </div>
 
                 <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
-                    All active engagements, ordered by soonest expected end date; each page is sorted worst-first.
-                    Revenue at risk is T&amp;M only; fixed-bid rows are a margin/utilization view. Read-only.
+                    One row per Resourced Activity with a Usage Cap (not rolled up to the engagement, so element-level
+                    over/under-burn isn't netted away). Status is driven by forecast revenue vs the cap. Read-only.
                 </p>
             </template>
 
             <template lwc:if={error}>
-                <p class="slds-text-color_error">Unable to load engagements.</p>
+                <p class="slds-text-color_error">Unable to load capped activities.</p>
             </template>
 
             <template lwc:if={showEmpty}>
-                <p class="slds-text-body_regular slds-text-color_weak">No active engagements match these filters.</p>
+                <p class="slds-text-body_regular slds-text-color_weak">No active capped activities match these filters.</p>
             </template>
         </div>
     </lightning-card>

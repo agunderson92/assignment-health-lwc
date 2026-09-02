@@ -16,6 +16,14 @@ starting point, not production-ready — see "Before production" below.
 - `lwc/engagementBurnPanel/` — drops on the **Engagement (`KimbleOne__DeliveryGroup__c`) record page**. Shows the burn-to-date + projection table for that engagement.
 - `lwc/myPortfolioBurn/` — drops on the **Home page** (or an App page). Shows the EM's active engagements, worst-first, each row navigates to the engagement.
 - `lwc/allEngagementsBurn/` — drops on a **Home or App page for leadership**. Shows all active engagements with Account + Manager columns, filterable by Account and Engagement Manager (`lightning-record-picker`), paginated (20/page). Each row navigates to the engagement.
+- `lwc/capBurndown/` — **leadership Home/App page**. Revenue-cap trending: one row per Resourced Activity that has a Usage Cap, filterable/paged/sortable, worst-first. Consumed $ and forecast $ vs the cap, with projected overage and a cap status.
+- `lwc/engagementCaps/` — **Engagement record page**. The same cap trending scoped to the engagement being viewed (one row per capped activity on that engagement).
+
+Sorting & navigation (all datatable widgets): columns are sortable (default sort = revenue at risk / % of cap, highest first; nulls last), and the row arrow opens the target record in a **new browser tab**. In the paged leadership widgets, client-side sort acts on the current page only.
+
+### Revenue caps (`getEngagementCaps`, `getActivityCapsPage`)
+
+The Usage Cap (`KimbleOne__UsageRevenueCap__c`) lives on the **Resourced Activity**, one cap per activity, and an engagement can have several. Cap trending is kept at **activity grain and never rolled up to the engagement** — aggregating would net a low-forecasting element against an over-forecasting one and hide the risk. Kimble already stores the actuals (`KimbleOne__ActualRevenue__c`, `KimbleOne__ActualUsageRevenueToCapFactor__c`) and forecast (`KimbleOne__ForecastP3Revenue__c`), so no revenue is recomputed from hours. Status is driven by **forecast ÷ cap**: `Over cap` (> 100% or already consumed), `At risk` (≥ 95%), `Watch` (≥ 85%), `Under-running` (< 70%), else `On track` — thresholds are constants (`CAP_ATRISK_PCT`, `CAP_WATCH_PCT`, `CAP_UNDER_PCT`), tune with Delivery Ops. Note: `ForecastP3Revenue` is total activity revenue; for activities with material expense revenue it slightly overstates the usage-cap comparison — refine with a usage-specific forecast field if that becomes an issue.
 
 ### Leadership paging / ordering design
 

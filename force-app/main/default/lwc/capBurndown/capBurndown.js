@@ -1,32 +1,32 @@
 import { LightningElement } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
-import getEngagementsPage from '@salesforce/apex/EngagementBurnController.getEngagementsPage';
+import getActivityCapsPage from '@salesforce/apex/EngagementBurnController.getActivityCapsPage';
 
 const COLUMNS = [
     { label: 'Account', fieldName: 'accountName', wrapText: true, sortable: true },
-    { label: 'Engagement', fieldName: 'name', wrapText: true, sortable: true,
+    { label: 'Engagement', fieldName: 'engagementName', wrapText: true, sortable: true,
       cellAttributes: { class: { fieldName: 'statusClass' } } },
-    { label: 'Manager', fieldName: 'managerName', wrapText: true, sortable: true },
-    { label: 'Model', fieldName: 'model', fixedWidth: 90, sortable: true },
-    { label: '% Cons.', fieldName: 'pctConsumed', type: 'number', sortable: true,
+    { label: 'Element', fieldName: 'elementName', wrapText: true, sortable: true },
+    { label: 'Cap', fieldName: 'cap', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: 'Consumed', fieldName: 'consumed', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: '% of cap cons.', fieldName: 'consumedPct', type: 'number', sortable: true,
       typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: '% Elap.', fieldName: 'pctComplete', type: 'number', sortable: true,
+    { label: 'Forecast', fieldName: 'forecast', type: 'currency', sortable: true,
+      typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
+    { label: '% of cap fcst.', fieldName: 'forecastPct', type: 'number', sortable: true,
       typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: 'Worked', fieldName: 'worked', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Forecast', fieldName: 'forecast', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Run-rate', fieldName: 'runRate', type: 'number', sortable: true,
-      typeAttributes: { maximumFractionDigits: 1 }, cellAttributes: { alignment: 'right' } },
-    { label: 'Proj. undel. (hr)', fieldName: 'projUndeliveredHrs', type: 'number', sortable: true, cellAttributes: { alignment: 'right' } },
-    { label: 'Rev. at risk', fieldName: 'revenueAtRisk', type: 'currency', sortable: true,
+    { label: 'Projected overage', fieldName: 'overage', type: 'currency', sortable: true,
       typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
     { label: 'Status', fieldName: 'status', sortable: true, cellAttributes: { class: { fieldName: 'statusClass' } } },
     { type: 'button-icon', fixedWidth: 40,
-      typeAttributes: { iconName: 'utility:new_window', title: 'Open in new tab', name: 'open', variant: 'bare' } }
+      typeAttributes: { iconName: 'utility:new_window', title: 'Open engagement in new tab', name: 'open', variant: 'bare' } }
 ];
 
 const PAGE_SIZE = 20;
 
-export default class AllEngagementsBurn extends NavigationMixin(LightningElement) {
+export default class CapBurndown extends NavigationMixin(LightningElement) {
     columns = COLUMNS;
     rows = [];
     error;
@@ -40,8 +40,8 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
     managerUserId = null;
     accountId = null;
 
-    // Default: highest revenue at risk first (applies within the current page)
-    sortedBy = 'revenueAtRisk';
+    // Default: highest projected % of cap first (applies within the current page)
+    sortedBy = 'forecastPct';
     sortDirection = 'desc';
 
     connectedCallback() {
@@ -50,16 +50,16 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
 
     load() {
         this.loading = true;
-        getEngagementsPage({
+        getActivityCapsPage({
             managerUserId: this.managerUserId,
             accountId: this.accountId,
             pageSize: this.pageSize,
             pageNumber: this.pageNumber
         })
             .then((res) => {
-                const mapped = (res.rows || []).map((e) => ({
-                    ...e,
-                    statusClass: this.statusClass(e.status)
+                const mapped = (res.rows || []).map((c) => ({
+                    ...c,
+                    statusClass: this.statusClass(c.status)
                 }));
                 this.rows = sortData(mapped, this.sortedBy, this.sortDirection);
                 this.totalCount = res.totalCount;
@@ -78,10 +78,17 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
 
     statusClass(status) {
         switch (status) {
-            case 'On track': return 'slds-text-color_success';
-            case 'At risk':  return 'slds-text-color_error';
-            default:         return 'slds-text-color_warning';
+            case 'Over cap':      return 'slds-text-color_error';
+            case 'At risk':       return 'slds-text-color_error';
+            case 'On track':      return 'slds-text-color_success';
+            default:              return 'slds-text-color_warning'; // Watch / Under-running
         }
+    }
+
+    handleSort(event) {
+        this.sortedBy = event.detail.fieldName;
+        this.sortDirection = event.detail.sortDirection;
+        this.rows = sortData(this.rows, this.sortedBy, this.sortDirection);
     }
 
     handleAccountChange(event) {
@@ -118,14 +125,9 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
         }
     }
 
-    handleSort(event) {
-        this.sortedBy = event.detail.fieldName;
-        this.sortDirection = event.detail.sortDirection;
-        this.rows = sortData(this.rows, this.sortedBy, this.sortDirection);
-    }
-
     handleRowAction(event) {
         const id = event.detail.row.engagementId;
+        if (!id) return;
         this[NavigationMixin.GenerateUrl]({
             type: 'standard__recordPage',
             attributes: { recordId: id, objectApiName: 'KimbleOne__DeliveryGroup__c', actionName: 'view' }
@@ -147,8 +149,8 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
         return this.pageNumber >= this.totalPages;
     }
     get pageLabel() {
-        if (!this.totalCount) return 'No engagements';
-        return `Page ${this.pageNumber} of ${this.totalPages} · ${this.totalCount} engagements`;
+        if (!this.totalCount) return 'No capped activities';
+        return `Page ${this.pageNumber} of ${this.totalPages} · ${this.totalCount} capped activities`;
     }
 }
 

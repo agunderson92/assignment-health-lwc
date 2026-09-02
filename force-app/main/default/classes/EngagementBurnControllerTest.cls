@@ -360,4 +360,133 @@ private class EngagementBurnControllerTest {
         System.assertEquals(0, p.totalCount, 'manager with no active engagements -> empty page');
         System.assertEquals(0, p.totalPages);
     }
+
+    // ===================== Revenue-cap trending =====================
+
+    // Note: Owner is a polymorphic relationship and cannot be set via JSON.deserialize,
+    // so managerName (g.Owner.Name) is not exercised here — same reason mkGrp omits it.
+    private static KimbleOne__ResourcedActivity__c mkRA(
+        Id raId, String activityName, Id engagementId, String engagementName,
+        String accountName, String elementName,
+        Decimal cap, Decimal actual, Decimal factor, Decimal forecast
+    ) {
+        Map<String, Object> f = new Map<String, Object>{
+            'KimbleOne__UsageRevenueCap__c'               => cap,
+            'KimbleOne__ActualRevenue__c'                 => actual,
+            'KimbleOne__ActualUsageRevenueToCapFactor__c' => factor,
+            'KimbleOne__ForecastP3Revenue__c'             => forecast
+        };
+        if (raId != null) f.put('Id', raId);
+        if (activityName != null) f.put('Name', activityName);
+
+        Map<String, Object> g = new Map<String, Object>{ 'Name' => engagementName };
+        if (accountName != null) g.put('KimbleOne__Account__r', new Map<String, Object>{ 'Name' => accountName });
+
+        Map<String, Object> el = new Map<String, Object>{
+            'Name' => elementName,
+            'KimbleOne__DeliveryGroup__r' => g
+        };
+        if (engagementId != null) el.put('KimbleOne__DeliveryGroup__c', engagementId);
+        f.put('KimbleOne__DeliveryElement__r', el);
+
+        return (KimbleOne__ResourcedActivity__c) JSON.deserialize(
+            JSON.serialize(f), KimbleOne__ResourcedActivity__c.class);
+    }
+
+    @isTest
+    static void classifyCap_allBands() {
+        System.assertEquals('On track',      EngagementBurnController.classifyCap(null, 50, 50), 'no cap');
+        System.assertEquals('Over cap',      EngagementBurnController.classifyCap(100000, 130000, 40000), 'forecast > cap');
+        System.assertEquals('Over cap',      EngagementBurnController.classifyCap(100000, 90000, 100000), 'already consumed the cap');
+        System.assertEquals('At risk',       EngagementBurnController.classifyCap(100000, 96000, 50000));
+        System.assertEquals('Watch',         EngagementBurnController.classifyCap(100000, 88000, 50000));
+        System.assertEquals('Under-running', EngagementBurnController.classifyCap(100000, 60000, 30000));
+        System.assertEquals('On track',      EngagementBurnController.classifyCap(100000, 78000, 40000));
+    }
+
+    @isTest
+    static void capSeverity_ordering() {
+        System.assertEquals(4, EngagementBurnController.capSev('Over cap'));
+        System.assertEquals(3, EngagementBurnController.capSev('At risk'));
+        System.assertEquals(2, EngagementBurnController.capSev('Watch'));
+        System.assertEquals(1, EngagementBurnController.capSev('Under-running'));
+        System.assertEquals(0, EngagementBurnController.capSev('On track'));
+    }
+
+    @isTest
+    static void buildCaps_mapsFieldsAndDerives() {
+        Id raId = fakeId(KimbleOne__ResourcedActivity__c.SObjectType);
+        Id engId = fakeId(KimbleOne__DeliveryGroup__c.SObjectType);
+        List<KimbleOne__ResourcedActivity__c> ras = new List<KimbleOne__ResourcedActivity__c>{
+            mkRA(raId, 'Config Activity', engId, 'BlueKC SOW', 'BlueKC', 'T&M Element',
+                 100000, 95000, 0.95, 98000)
+        };
+        List<EngagementBurnController.ActivityCap> caps = EngagementBurnController.buildCaps(ras);
+        EngagementBurnController.ActivityCap c = caps[0];
+
+        System.assertEquals(raId, c.activityId);
+        System.assertEquals(engId, c.engagementId, 'engagement id carried for nav');
+        System.assertEquals('BlueKC SOW', c.engagementName);
+        System.assertEquals('BlueKC', c.accountName);
+        System.assertEquals('T&M Element', c.elementName);
+        System.assertEquals(95.0, c.consumedPct, 'from the to-cap factor');
+        System.assertEquals(98.0, c.forecastPct, 'forecast / cap');
+        System.assertEquals(2000, c.headroom, 'cap - forecast');
+        System.assertEquals(0, c.overage, 'not projected over');
+        System.assertEquals('At risk', c.status);
+    }
+
+    @isTest
+    static void buildCaps_overCapShowsOverage() {
+        List<KimbleOne__ResourcedActivity__c> ras = new List<KimbleOne__ResourcedActivity__c>{
+            mkRA(null, 'A', null, 'Eng', null, 'El', 100000, 50000, 0.5, 120000)
+        };
+        EngagementBurnController.ActivityCap c = EngagementBurnController.buildCaps(ras)[0];
+        System.assertEquals('Over cap', c.status);
+        System.assertEquals(20000, c.overage, 'forecast - cap');
+        System.assertEquals(-20000, c.headroom, 'negative headroom = projected breach');
+    }
+
+    @isTest
+    static void capWorstFirst_sorts() {
+        EngagementBurnController.ActivityCap watch = new EngagementBurnController.ActivityCap();
+        watch.status = 'Watch'; watch.forecastPct = 88;
+        EngagementBurnController.ActivityCap over = new EngagementBurnController.ActivityCap();
+        over.status = 'Over cap'; over.forecastPct = 120;
+        List<EngagementBurnController.ActivityCap> l =
+            new List<EngagementBurnController.ActivityCap>{ watch, over };
+        l.sort(new EngagementBurnController.CapWorstFirst());
+        System.assertEquals('Over cap', l[0].status, 'worst status first');
+
+        EngagementBurnController.ActivityCap lo = new EngagementBurnController.ActivityCap();
+        lo.status = 'Watch'; lo.forecastPct = 86;
+        EngagementBurnController.ActivityCap hi = new EngagementBurnController.ActivityCap();
+        hi.status = 'Watch'; hi.forecastPct = 90;
+        List<EngagementBurnController.ActivityCap> l2 =
+            new List<EngagementBurnController.ActivityCap>{ lo, hi };
+        l2.sort(new EngagementBurnController.CapWorstFirst());
+        System.assertEquals(90, l2[0].forecastPct, 'ties break on higher projected % of cap');
+    }
+
+    @isTest
+    static void capEntryPoints_runAgainstEmptyOrg() {
+        Test.startTest();
+        List<EngagementBurnController.ActivityCap> single =
+            EngagementBurnController.getEngagementCaps(fakeId(KimbleOne__DeliveryGroup__c.SObjectType));
+        EngagementBurnController.PagedActivityCaps page =
+            EngagementBurnController.getActivityCapsPage(null, null, null, 0);
+        EngagementBurnController.PagedActivityCaps capped =
+            EngagementBurnController.getActivityCapsPage(null, null, 999, 1);
+        EngagementBurnController.PagedActivityCaps mgr =
+            EngagementBurnController.getActivityCapsPage(fakeId(User.SObjectType), null, 20, 1);
+        Test.stopTest();
+
+        System.assertNotEquals(null, single);
+        System.assertEquals(0, single.size());
+        System.assertEquals(20, page.pageSize, 'null size defaults to 20');
+        System.assertEquals(1, page.pageNumber, 'page 0 clamps to 1');
+        System.assertEquals(0, page.totalCount);
+        System.assertEquals(50, capped.pageSize, 'size capped at max');
+        System.assertEquals(0, mgr.totalCount, 'manager with no engagements short-circuits');
+    }
 }
