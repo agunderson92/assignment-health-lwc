@@ -47,6 +47,8 @@ public with sharing class EngagementBurnController {
     public class EngagementBurn {
         @AuraEnabled public Id      engagementId;
         @AuraEnabled public String  name;
+        @AuraEnabled public String  accountName;   // client account (leadership view)
+        @AuraEnabled public String  managerName;   // engagement owner (leadership view)
         @AuraEnabled public String  status;
         @AuraEnabled public String  model;
         @AuraEnabled public Decimal pctConsumed;
@@ -81,6 +83,269 @@ public with sharing class EngagementBurnController {
         return out;
     }
 
+    // ===================== Leadership (all engagements, filtered + paged) =====================
+
+    public class PagedEngagements {
+        @AuraEnabled public List<EngagementBurn> rows;
+        @AuraEnabled public Integer pageNumber;
+        @AuraEnabled public Integer pageSize;
+        @AuraEnabled public Integer totalCount;
+        @AuraEnabled public Integer totalPages;
+    }
+
+    private static final Integer MAX_PAGE_SIZE = 50;
+    private static final Integer MAX_OFFSET    = 2000; // SOQL OFFSET hard limit
+
+    /**
+     * Leadership LWC: all active engagements, optionally filtered by manager and/or account,
+     * one page at a time. Burn is computed only for the engagements on the requested page, so
+     * the cost is bounded regardless of how many active engagements exist org-wide.
+     *
+     * Ordering is by soonest expected end date (most time-sensitive first) for stable paging;
+     * the returned page is then sorted worst-first so risk surfaces within the page.
+     */
+    @AuraEnabled(cacheable=true)
+    public static PagedEngagements getEngagementsPage(
+        Id managerUserId, Id accountId, Integer pageSize, Integer pageNumber
+    ) {
+        Date today = Date.today();
+        Set<String> statuses = ACTIVE_FORECAST_STATUS; // local bind for dynamic SOQL
+        Integer sz = (pageSize == null || pageSize <= 0) ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
+        Integer pg = (pageNumber == null || pageNumber < 1) ? 1 : pageNumber;
+
+        PagedEngagements out = new PagedEngagements();
+        out.pageSize = sz;
+        out.pageNumber = pg;
+        out.rows = new List<EngagementBurn>();
+
+        // Manager filter -> restrict to that manager's engagement Ids (owner OR EM delivery actor)
+        Set<Id> mgrIds;
+        if (managerUserId != null) {
+            mgrIds = activeEngagementIdsForEm(managerUserId);
+            if (mgrIds.isEmpty()) {
+                out.totalCount = 0;
+                out.totalPages = 0;
+                return out;
+            }
+        }
+
+        String whereClause =
+            'KimbleOne__ExpectedStartDate__c <= :today '
+          + 'AND KimbleOne__ExpectedEndDate__c > :today '
+          + 'AND KimbleOne__ForecastStatus__r.Name IN :statuses';
+        if (accountId != null) whereClause += ' AND KimbleOne__Account__c = :accountId';
+        if (mgrIds != null)    whereClause += ' AND Id IN :mgrIds';
+
+        out.totalCount = Database.countQuery(
+            'SELECT COUNT() FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause);
+        out.totalPages = (out.totalCount + sz - 1) / sz;
+
+        Integer offsetRows = (pg - 1) * sz;
+        if (out.totalCount == 0 || offsetRows >= out.totalCount || offsetRows > MAX_OFFSET) {
+            return out; // nothing to show on this page (or paged past the SOQL offset ceiling)
+        }
+
+        List<KimbleOne__DeliveryGroup__c> pageGrps = Database.query(
+            'SELECT Id FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause
+          + ' ORDER BY KimbleOne__ExpectedEndDate__c ASC NULLS LAST, Name ASC'
+          + ' LIMIT :sz OFFSET :offsetRows');
+
+        Set<Id> pageIds = new Map<Id, SObject>(pageGrps).keySet();
+        Map<Id, EngagementBurn> byGrp = buildForGroups(pageIds, false);
+
+        List<EngagementBurn> rows = byGrp.values();
+        rows.sort(new WorstFirst());
+        out.rows = rows;
+        return out;
+    }
+
+    // ===================== Revenue-cap trending (activity grain) =====================
+    //
+    // The Usage Cap (KimbleOne__UsageRevenueCap__c) lives on the Resourced Activity, one cap
+    // per activity, and an engagement can have several. We deliberately keep this at ACTIVITY
+    // grain and never roll it up to the engagement: aggregating caps would net a low-forecasting
+    // element against an over-forecasting one and hide the risk. Kimble stores the actuals and a
+    // consumed-to-cap factor, so no revenue is recomputed from hours here.
+
+    // Cap status thresholds (% of cap forecast to be consumed; tune with Delivery Ops)
+    private static final Decimal CAP_ATRISK_PCT = 95;
+    private static final Decimal CAP_WATCH_PCT  = 85;
+    private static final Decimal CAP_UNDER_PCT  = 70;
+
+    public class ActivityCap {
+        @AuraEnabled public Id      activityId;
+        @AuraEnabled public String  activityName;
+        @AuraEnabled public Id      engagementId;
+        @AuraEnabled public String  engagementName;
+        @AuraEnabled public String  accountName;
+        @AuraEnabled public String  managerName;
+        @AuraEnabled public String  elementName;
+        @AuraEnabled public Decimal cap;          // $ Usage Cap
+        @AuraEnabled public Decimal consumed;     // $ actual revenue to date
+        @AuraEnabled public Decimal consumedPct;  // % of cap consumed
+        @AuraEnabled public Decimal forecast;     // $ projected total revenue
+        @AuraEnabled public Decimal forecastPct;  // % of cap projected
+        @AuraEnabled public Decimal headroom;     // $ cap - forecast (negative = projected overage)
+        @AuraEnabled public Decimal overage;      // $ max(forecast - cap, 0)
+        @AuraEnabled public String  status;       // Over cap | At risk | Watch | Under-running | On track
+    }
+
+    public class PagedActivityCaps {
+        @AuraEnabled public List<ActivityCap> rows;
+        @AuraEnabled public Integer pageNumber;
+        @AuraEnabled public Integer pageSize;
+        @AuraEnabled public Integer totalCount;
+        @AuraEnabled public Integer totalPages;
+    }
+
+    private static final String CAP_FIELDS =
+        'Id, Name, KimbleOne__UsageRevenueCap__c, KimbleOne__ActualRevenue__c, '
+      + 'KimbleOne__ActualUsageRevenueToCapFactor__c, KimbleOne__ForecastP3Revenue__c, '
+      + 'KimbleOne__DeliveryElement__r.Name, '
+      + 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__c, '
+      + 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__r.Name, '
+      + 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__r.KimbleOne__Account__r.Name, '
+      + 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__r.Owner.Name';
+
+    /** Record-page LWC: capped activities for a single engagement, worst-first. */
+    @AuraEnabled(cacheable=true)
+    public static List<ActivityCap> getEngagementCaps(Id engagementId) {
+        List<KimbleOne__ResourcedActivity__c> ras = Database.query(
+            'SELECT ' + CAP_FIELDS + ' FROM KimbleOne__ResourcedActivity__c '
+          + 'WHERE KimbleOne__UsageRevenueCap__c > 0 '
+          + '  AND KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__c = :engagementId '
+          + 'ORDER BY KimbleOne__UsageRevenueCap__c DESC');
+        List<ActivityCap> caps = buildCaps(ras);
+        caps.sort(new CapWorstFirst());
+        return caps;
+    }
+
+    /** Leadership LWC: all capped activities on active engagements, filtered + paged. */
+    @AuraEnabled(cacheable=true)
+    public static PagedActivityCaps getActivityCapsPage(
+        Id managerUserId, Id accountId, Integer pageSize, Integer pageNumber
+    ) {
+        Date today = Date.today();
+        Set<String> statuses = ACTIVE_FORECAST_STATUS;
+        Integer sz = (pageSize == null || pageSize <= 0) ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
+        Integer pg = (pageNumber == null || pageNumber < 1) ? 1 : pageNumber;
+
+        PagedActivityCaps out = new PagedActivityCaps();
+        out.pageSize = sz;
+        out.pageNumber = pg;
+        out.rows = new List<ActivityCap>();
+
+        Set<Id> mgrIds;
+        if (managerUserId != null) {
+            mgrIds = activeEngagementIdsForEm(managerUserId);
+            if (mgrIds.isEmpty()) {
+                out.totalCount = 0;
+                out.totalPages = 0;
+                return out;
+            }
+        }
+
+        String grp = 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__r.';
+        String whereClause =
+            'KimbleOne__UsageRevenueCap__c > 0 '
+          + 'AND ' + grp + 'KimbleOne__ExpectedStartDate__c <= :today '
+          + 'AND ' + grp + 'KimbleOne__ExpectedEndDate__c > :today '
+          + 'AND ' + grp + 'KimbleOne__ForecastStatus__r.Name IN :statuses';
+        if (accountId != null) whereClause += ' AND ' + grp + 'KimbleOne__Account__c = :accountId';
+        if (mgrIds != null)    whereClause += ' AND KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__c IN :mgrIds';
+
+        out.totalCount = Database.countQuery(
+            'SELECT COUNT() FROM KimbleOne__ResourcedActivity__c WHERE ' + whereClause);
+        out.totalPages = (out.totalCount + sz - 1) / sz;
+
+        Integer offsetRows = (pg - 1) * sz;
+        if (out.totalCount == 0 || offsetRows >= out.totalCount || offsetRows > MAX_OFFSET) {
+            return out;
+        }
+
+        List<KimbleOne__ResourcedActivity__c> ras = Database.query(
+            'SELECT ' + CAP_FIELDS + ' FROM KimbleOne__ResourcedActivity__c WHERE ' + whereClause
+          + ' ORDER BY KimbleOne__UsageRevenueCap__c DESC NULLS LAST'
+          + ' LIMIT :sz OFFSET :offsetRows');
+
+        List<ActivityCap> caps = buildCaps(ras);
+        caps.sort(new CapWorstFirst());
+        out.rows = caps;
+        return out;
+    }
+
+    @TestVisible
+    private static List<ActivityCap> buildCaps(List<KimbleOne__ResourcedActivity__c> ras) {
+        List<ActivityCap> out = new List<ActivityCap>();
+        for (KimbleOne__ResourcedActivity__c ra : ras) {
+            Decimal cap      = ra.KimbleOne__UsageRevenueCap__c;
+            Decimal consumed = ra.KimbleOne__ActualRevenue__c;
+            Decimal forecast = ra.KimbleOne__ForecastP3Revenue__c;
+            Decimal factor   = ra.KimbleOne__ActualUsageRevenueToCapFactor__c;
+
+            ActivityCap c = new ActivityCap();
+            c.activityId   = ra.Id;
+            c.activityName = ra.Name;
+
+            KimbleOne__DeliveryElement__c el = ra.KimbleOne__DeliveryElement__r;
+            if (el != null) {
+                c.elementName   = el.Name;
+                c.engagementId  = el.KimbleOne__DeliveryGroup__c;
+                KimbleOne__DeliveryGroup__c g = el.KimbleOne__DeliveryGroup__r;
+                if (g != null) {
+                    c.engagementName = g.Name;
+                    c.accountName = g.KimbleOne__Account__r != null ? g.KimbleOne__Account__r.Name : null;
+                    c.managerName = g.Owner != null ? g.Owner.Name : null;
+                }
+            }
+
+            c.cap      = cap == null ? null : cap.setScale(0);
+            c.consumed = consumed == null ? null : consumed.setScale(0);
+            c.forecast = forecast == null ? null : forecast.setScale(0);
+            c.consumedPct = (factor != null) ? (factor * 100).setScale(1)
+                : (cap != null && cap > 0 && consumed != null ? (consumed / cap * 100).setScale(1) : null);
+            c.forecastPct = (cap != null && cap > 0 && forecast != null)
+                ? (forecast / cap * 100).setScale(1) : null;
+            c.headroom = (cap != null && forecast != null) ? (cap - forecast).setScale(0) : null;
+            c.overage  = (cap != null && forecast != null) ? Math.max(forecast - cap, 0).setScale(0) : 0;
+            c.status   = classifyCap(cap, forecast, consumed);
+            out.add(c);
+        }
+        return out;
+    }
+
+    @TestVisible
+    private static String classifyCap(Decimal cap, Decimal forecast, Decimal consumed) {
+        if (cap == null || cap <= 0) return 'On track';
+        Decimal fPct = forecast == null ? 0 : forecast / cap * 100;
+        Decimal cPct = consumed == null ? 0 : consumed / cap * 100;
+        if (cPct >= 100 || fPct > 100) return 'Over cap';
+        if (fPct >= CAP_ATRISK_PCT)    return 'At risk';
+        if (fPct >= CAP_WATCH_PCT)     return 'Watch';
+        if (fPct <  CAP_UNDER_PCT)     return 'Under-running';
+        return 'On track';
+    }
+
+    @TestVisible
+    private static Integer capSev(String s) {
+        if (s == 'Over cap')      return 4;
+        if (s == 'At risk')       return 3;
+        if (s == 'Watch')         return 2;
+        if (s == 'Under-running') return 1;
+        return 0; // On track
+    }
+
+    // worst-first for caps: severity, then higher projected % of cap
+    public class CapWorstFirst implements Comparator<ActivityCap> {
+        public Integer compare(ActivityCap x, ActivityCap y) {
+            Integer d = capSev(y.status) - capSev(x.status);
+            if (d != 0) return d;
+            Decimal fx = x.forecastPct == null ? 0 : x.forecastPct;
+            Decimal fy = y.forecastPct == null ? 0 : y.forecastPct;
+            return fy > fx ? 1 : (fy < fx ? -1 : 0);
+        }
+    }
+
     // ===================== Core builder =====================
 
     private static Map<Id, EngagementBurn> buildForGroups(Set<Id> grpIds, Boolean includeAssignments) {
@@ -90,7 +355,7 @@ public with sharing class EngagementBurnController {
 
         // Engagement headers
         Map<Id, KimbleOne__DeliveryGroup__c> grps = new Map<Id, KimbleOne__DeliveryGroup__c>([
-            SELECT Id, Name, On_Hold__c
+            SELECT Id, Name, On_Hold__c, KimbleOne__Account__r.Name, Owner.Name
             FROM KimbleOne__DeliveryGroup__c
             WHERE Id IN :grpIds
         ]);
@@ -124,12 +389,35 @@ public with sharing class EngagementBurnController {
             }
         }
 
+        return assemble(grpIds, grps, asgs, recentHrs, includeAssignments, today);
+    }
+
+    /**
+     * Pure in-memory assembly of the engagement rollups from already-queried data.
+     * Split out from the SOQL so the classification/rollup logic is unit-testable
+     * without inserting managed-package records. Referenced by tests via @TestVisible.
+     */
+    @TestVisible
+    private static Map<Id, EngagementBurn> assemble(
+        Set<Id> grpIds,
+        Map<Id, KimbleOne__DeliveryGroup__c> grps,
+        List<KimbleOne__ActivityAssignment__c> asgs,
+        Map<Id, Decimal> recentHrs,
+        Boolean includeAssignments,
+        Date today
+    ) {
+        Map<Id, EngagementBurn> result = new Map<Id, EngagementBurn>();
+        if (recentHrs == null) recentHrs = new Map<Id, Decimal>();
+
         // Seed engagement wrappers
         for (Id gid : grpIds) {
             if (!grps.containsKey(gid)) continue;
+            KimbleOne__DeliveryGroup__c g = grps.get(gid);
             EngagementBurn e = new EngagementBurn();
             e.engagementId = gid;
-            e.name = grps.get(gid).Name;
+            e.name = g.Name;
+            e.accountName = g.KimbleOne__Account__r != null ? g.KimbleOne__Account__r.Name : null;
+            e.managerName = g.Owner != null ? g.Owner.Name : null;
             e.assignments = new List<AssignmentBurn>();
             e.forecast = 0; e.worked = 0; e.runRate = 0;
             e.projUndeliveredHrs = 0; e.revenueAtRisk = 0;
@@ -140,6 +428,8 @@ public with sharing class EngagementBurnController {
         // Track worst child + forecast-weighted %complete numerator per engagement
         Map<Id, Decimal> completeNumer = new Map<Id, Decimal>();
         Map<Id, String> worstStatus = new Map<Id, String>();
+        // Distinct revenue models seen per engagement (for the engagement-level rollup)
+        Map<Id, Set<String>> modelsByGrp = new Map<Id, Set<String>>();
 
         for (KimbleOne__ActivityAssignment__c a : asgs) {
             EngagementBurn e = result.get(a.KimbleOne__DeliveryGroup__c);
@@ -167,12 +457,21 @@ public with sharing class EngagementBurnController {
                 worstStatus.put(e.engagementId, worseOf(cur, b.status));
             }
 
+            // collect the revenue models present on this engagement's assignments
+            if (b.model != null && b.model != 'Other') {
+                if (!modelsByGrp.containsKey(e.engagementId)) {
+                    modelsByGrp.put(e.engagementId, new Set<String>());
+                }
+                modelsByGrp.get(e.engagementId).add(b.model);
+            }
+
             if (includeAssignments) e.assignments.add(b);
         }
 
         // Finalize engagement rollups
         for (EngagementBurn e : result.values()) {
             e.resourceCount = e.assignments != null ? e.assignments.size() : null;
+            e.model = rollupModel(modelsByGrp.get(e.engagementId));
             e.pctConsumed = e.forecast > 0 ? (e.worked / e.forecast * 100).setScale(1) : null;
             e.pctComplete = e.forecast > 0 && completeNumer.containsKey(e.engagementId)
                 ? (completeNumer.get(e.engagementId) / e.forecast).setScale(1) : null;
@@ -188,6 +487,7 @@ public with sharing class EngagementBurnController {
 
     // ===================== Per-assignment math + classification =====================
 
+    @TestVisible
     private static AssignmentBurn computeAssignment(
         KimbleOne__ActivityAssignment__c a, Decimal recent42, Boolean paused, Date today
     ) {
@@ -231,6 +531,7 @@ public with sharing class EngagementBurnController {
         return b;
     }
 
+    @TestVisible
     private static String classify(
         AssignmentBurn b, Boolean paused, Decimal weeksElapsed, Decimal projConsumptionPct
     ) {
@@ -275,6 +576,7 @@ public with sharing class EngagementBurnController {
 
     private static Decimal nz(Decimal d) { return d == null ? 0 : d; }
 
+    @TestVisible
     private static String mapModel(KimbleOne__ActivityAssignment__c a) {
         String gen;
         try {
@@ -290,7 +592,16 @@ public with sharing class EngagementBurnController {
         return 'Other';
     }
 
+    /** Roll the distinct per-assignment models up to a single engagement-level label. */
+    @TestVisible
+    private static String rollupModel(Set<String> models) {
+        if (models == null || models.isEmpty()) return null;
+        if (models.size() == 1) return new List<String>(models)[0];
+        return 'Mixed';
+    }
+
     // severity ordering for status rollups
+    @TestVisible
     private static Integer sev(String s) {
         if (s == 'At risk') return 4;
         if (s == 'Watch' || s == 'Verify' || s == 'Monitor') return 3;

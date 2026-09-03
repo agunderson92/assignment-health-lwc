@@ -1,0 +1,31 @@
+<template>
+    <lightning-card title="Revenue Caps" icon-name="utility:money">
+        <div class="slds-p-horizontal_medium slds-p-bottom_medium">
+            <template lwc:if={hasRows}>
+                <lightning-datatable
+                    key-field="activityId"
+                    columns={columns}
+                    data={rows}
+                    hide-checkbox-column
+                    sorted-by={sortedBy}
+                    sorted-direction={sortDirection}
+                    onsort={handleSort}
+                    onrowaction={handleRowAction}
+                    column-widths-mode="auto">
+                </lightning-datatable>
+                <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
+                    Per capped activity (not netted to the engagement). Status is driven by forecast revenue vs the
+                    Usage Cap. Read-only.
+                </p>
+            </template>
+
+            <template lwc:if={error}>
+                <p class="slds-text-color_error">Unable to load revenue caps.</p>
+            </template>
+
+            <template lwc:if={showEmpty}>
+                <p class="slds-text-body_regular slds-text-color_weak">No activities on this engagement have a revenue cap.</p>
+            </template>
+        </div>
+    </lightning-card>
+</template>

@@ -7,6 +7,9 @@
                     columns={columns}
                     data={rows}
                     hide-checkbox-column
+                    sorted-by={sortedBy}
+                    sorted-direction={sortDirection}
+                    onsort={handleSort}
                     onrowaction={handleRowAction}
                     column-widths-mode="auto">
                 </lightning-datatable>
