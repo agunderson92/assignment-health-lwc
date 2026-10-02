@@ -83,50 +83,46 @@ public with sharing class EngagementBurnController {
         return out;
     }
 
-    // ===================== Leadership (all engagements, filtered + paged) =====================
+    // ===================== Leadership (all engagements, filtered) =====================
 
-    public class PagedEngagements {
-        @AuraEnabled public List<EngagementBurn> rows;
-        @AuraEnabled public Integer pageNumber;
-        @AuraEnabled public Integer pageSize;
-        @AuraEnabled public Integer totalCount;
-        @AuraEnabled public Integer totalPages;
-    }
-
-    private static final Integer MAX_PAGE_SIZE = 50;
-    private static final Integer MAX_OFFSET    = 2000; // SOQL OFFSET hard limit
+    // Engagements are computed in chunks so that peak heap stays bounded even across the full
+    // org-wide active set (each chunk's assignment rows fall out of scope before the next loads).
+    // The full computed list is returned in one call; the LWC sorts and paginates client-side,
+    // so ordering is global (not per-page) and paging/re-sorting is instant.
+    private static final Integer ENGAGEMENT_CHUNK = 50;
 
     /**
-     * Leadership LWC: all active engagements, optionally filtered by manager and/or account,
-     * one page at a time. Burn is computed only for the engagements on the requested page, so
-     * the cost is bounded regardless of how many active engagements exist org-wide.
-     *
-     * Ordering is by soonest expected end date (most time-sensitive first) for stable paging;
-     * the returned page is then sorted worst-first so risk surfaces within the page.
+     * Leadership LWC: every active engagement, optionally filtered by manager and/or account,
+     * fully computed and returned worst-first. No server paging — the client pages the result.
      */
     @AuraEnabled(cacheable=true)
-    public static PagedEngagements getEngagementsPage(
-        Id managerUserId, Id accountId, Integer pageSize, Integer pageNumber
-    ) {
+    public static List<EngagementBurn> getPortfolioAll(Id managerUserId, Id accountId) {
+        Set<Id> ids = filteredActiveEngagementIds(managerUserId, accountId);
+        Map<Id, EngagementBurn> all = new Map<Id, EngagementBurn>();
+
+        List<Id> idList = new List<Id>(ids);
+        for (Integer i = 0; i < idList.size(); i += ENGAGEMENT_CHUNK) {
+            Set<Id> slice = new Set<Id>();
+            for (Integer j = i; j < Math.min(i + ENGAGEMENT_CHUNK, idList.size()); j++) {
+                slice.add(idList[j]);
+            }
+            all.putAll(buildForGroups(slice, false));
+        }
+
+        List<EngagementBurn> out = all.values();
+        out.sort(new WorstFirst());
+        return out;
+    }
+
+    /** Active-engagement Ids matching the optional manager / account filters. */
+    private static Set<Id> filteredActiveEngagementIds(Id managerUserId, Id accountId) {
         Date today = Date.today();
         Set<String> statuses = ACTIVE_FORECAST_STATUS; // local bind for dynamic SOQL
-        Integer sz = (pageSize == null || pageSize <= 0) ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
-        Integer pg = (pageNumber == null || pageNumber < 1) ? 1 : pageNumber;
 
-        PagedEngagements out = new PagedEngagements();
-        out.pageSize = sz;
-        out.pageNumber = pg;
-        out.rows = new List<EngagementBurn>();
-
-        // Manager filter -> restrict to that manager's engagement Ids (owner OR EM delivery actor)
         Set<Id> mgrIds;
         if (managerUserId != null) {
             mgrIds = activeEngagementIdsForEm(managerUserId);
-            if (mgrIds.isEmpty()) {
-                out.totalCount = 0;
-                out.totalPages = 0;
-                return out;
-            }
+            if (mgrIds.isEmpty()) return new Set<Id>();
         }
 
         String whereClause =
@@ -136,27 +132,12 @@ public with sharing class EngagementBurnController {
         if (accountId != null) whereClause += ' AND KimbleOne__Account__c = :accountId';
         if (mgrIds != null)    whereClause += ' AND Id IN :mgrIds';
 
-        out.totalCount = Database.countQuery(
-            'SELECT COUNT() FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause);
-        out.totalPages = (out.totalCount + sz - 1) / sz;
-
-        Integer offsetRows = (pg - 1) * sz;
-        if (out.totalCount == 0 || offsetRows >= out.totalCount || offsetRows > MAX_OFFSET) {
-            return out; // nothing to show on this page (or paged past the SOQL offset ceiling)
+        Set<Id> ids = new Set<Id>();
+        for (KimbleOne__DeliveryGroup__c g : Database.query(
+                'SELECT Id FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause)) {
+            ids.add(g.Id);
         }
-
-        List<KimbleOne__DeliveryGroup__c> pageGrps = Database.query(
-            'SELECT Id FROM KimbleOne__DeliveryGroup__c WHERE ' + whereClause
-          + ' ORDER BY KimbleOne__ExpectedEndDate__c ASC NULLS LAST, Name ASC'
-          + ' LIMIT :sz OFFSET :offsetRows');
-
-        Set<Id> pageIds = new Map<Id, SObject>(pageGrps).keySet();
-        Map<Id, EngagementBurn> byGrp = buildForGroups(pageIds, false);
-
-        List<EngagementBurn> rows = byGrp.values();
-        rows.sort(new WorstFirst());
-        out.rows = rows;
-        return out;
+        return ids;
     }
 
     // ===================== Revenue-cap trending (activity grain) =====================
@@ -167,10 +148,9 @@ public with sharing class EngagementBurnController {
     // element against an over-forecasting one and hide the risk. Kimble stores the actuals and a
     // consumed-to-cap factor, so no revenue is recomputed from hours here.
 
-    // Cap status thresholds (% of cap forecast to be consumed; tune with Delivery Ops)
-    private static final Decimal CAP_ATRISK_PCT = 95;
-    private static final Decimal CAP_WATCH_PCT  = 85;
-    private static final Decimal CAP_UNDER_PCT  = 70;
+    // Cap status threshold (tune with Delivery Ops). Forecast trending up to 100% of the cap is
+    // healthy ("On track"); only a forecast that projects to EXCEED the cap is a risk.
+    private static final Decimal CAP_UNDER_PCT = 70; // forecast below this % of cap -> Under-running
 
     public class ActivityCap {
         @AuraEnabled public Id      activityId;
@@ -187,15 +167,7 @@ public with sharing class EngagementBurnController {
         @AuraEnabled public Decimal forecastPct;  // % of cap projected
         @AuraEnabled public Decimal headroom;     // $ cap - forecast (negative = projected overage)
         @AuraEnabled public Decimal overage;      // $ max(forecast - cap, 0)
-        @AuraEnabled public String  status;       // Over cap | At risk | Watch | Under-running | On track
-    }
-
-    public class PagedActivityCaps {
-        @AuraEnabled public List<ActivityCap> rows;
-        @AuraEnabled public Integer pageNumber;
-        @AuraEnabled public Integer pageSize;
-        @AuraEnabled public Integer totalCount;
-        @AuraEnabled public Integer totalPages;
+        @AuraEnabled public String  status;       // Over cap | At risk | Under-running | On track
     }
 
     private static final String CAP_FIELDS =
@@ -220,29 +192,35 @@ public with sharing class EngagementBurnController {
         return caps;
     }
 
-    /** Leadership LWC: all capped activities on active engagements, filtered + paged. */
+    /** Home-page LWC: capped activities on the logged-in user's active engagements (owner or EM actor). */
     @AuraEnabled(cacheable=true)
-    public static PagedActivityCaps getActivityCapsPage(
-        Id managerUserId, Id accountId, Integer pageSize, Integer pageNumber
-    ) {
+    public static List<ActivityCap> getMyCaps() {
+        Set<Id> grpIds = activeEngagementIdsForEm(UserInfo.getUserId());
+        if (grpIds.isEmpty()) return new List<ActivityCap>();
+        List<KimbleOne__ResourcedActivity__c> ras = Database.query(
+            'SELECT ' + CAP_FIELDS + ' FROM KimbleOne__ResourcedActivity__c '
+          + 'WHERE KimbleOne__UsageRevenueCap__c > 0 '
+          + '  AND KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__c IN :grpIds '
+          + 'ORDER BY KimbleOne__UsageRevenueCap__c DESC');
+        List<ActivityCap> caps = buildCaps(ras);
+        caps.sort(new CapWorstFirst());
+        return caps;
+    }
+
+    /**
+     * Leadership LWC: all capped activities on active engagements, optionally filtered by
+     * manager and/or account, worst-first. Capped activities are a small subset, so the full
+     * set is returned in one call and the client sorts / paginates it.
+     */
+    @AuraEnabled(cacheable=true)
+    public static List<ActivityCap> getAllActivityCaps(Id managerUserId, Id accountId) {
         Date today = Date.today();
         Set<String> statuses = ACTIVE_FORECAST_STATUS;
-        Integer sz = (pageSize == null || pageSize <= 0) ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
-        Integer pg = (pageNumber == null || pageNumber < 1) ? 1 : pageNumber;
-
-        PagedActivityCaps out = new PagedActivityCaps();
-        out.pageSize = sz;
-        out.pageNumber = pg;
-        out.rows = new List<ActivityCap>();
 
         Set<Id> mgrIds;
         if (managerUserId != null) {
             mgrIds = activeEngagementIdsForEm(managerUserId);
-            if (mgrIds.isEmpty()) {
-                out.totalCount = 0;
-                out.totalPages = 0;
-                return out;
-            }
+            if (mgrIds.isEmpty()) return new List<ActivityCap>();
         }
 
         String grp = 'KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__r.';
@@ -254,24 +232,13 @@ public with sharing class EngagementBurnController {
         if (accountId != null) whereClause += ' AND ' + grp + 'KimbleOne__Account__c = :accountId';
         if (mgrIds != null)    whereClause += ' AND KimbleOne__DeliveryElement__r.KimbleOne__DeliveryGroup__c IN :mgrIds';
 
-        out.totalCount = Database.countQuery(
-            'SELECT COUNT() FROM KimbleOne__ResourcedActivity__c WHERE ' + whereClause);
-        out.totalPages = (out.totalCount + sz - 1) / sz;
-
-        Integer offsetRows = (pg - 1) * sz;
-        if (out.totalCount == 0 || offsetRows >= out.totalCount || offsetRows > MAX_OFFSET) {
-            return out;
-        }
-
         List<KimbleOne__ResourcedActivity__c> ras = Database.query(
             'SELECT ' + CAP_FIELDS + ' FROM KimbleOne__ResourcedActivity__c WHERE ' + whereClause
-          + ' ORDER BY KimbleOne__UsageRevenueCap__c DESC NULLS LAST'
-          + ' LIMIT :sz OFFSET :offsetRows');
+          + ' ORDER BY KimbleOne__UsageRevenueCap__c DESC NULLS LAST');
 
         List<ActivityCap> caps = buildCaps(ras);
         caps.sort(new CapWorstFirst());
-        out.rows = caps;
-        return out;
+        return caps;
     }
 
     @TestVisible
@@ -319,18 +286,16 @@ public with sharing class EngagementBurnController {
         if (cap == null || cap <= 0) return 'On track';
         Decimal fPct = forecast == null ? 0 : forecast / cap * 100;
         Decimal cPct = consumed == null ? 0 : consumed / cap * 100;
-        if (cPct >= 100 || fPct > 100) return 'Over cap';
-        if (fPct >= CAP_ATRISK_PCT)    return 'At risk';
-        if (fPct >= CAP_WATCH_PCT)     return 'Watch';
-        if (fPct <  CAP_UNDER_PCT)     return 'Under-running';
-        return 'On track';
+        if (cPct >= 100)          return 'Over cap';      // cap already fully consumed
+        if (fPct > 100)           return 'At risk';       // projected to EXCEED the cap
+        if (fPct < CAP_UNDER_PCT) return 'Under-running'; // leaving cap unspent
+        return 'On track';                                // trending to full use (<=100%) is healthy
     }
 
     @TestVisible
     private static Integer capSev(String s) {
-        if (s == 'Over cap')      return 4;
-        if (s == 'At risk')       return 3;
-        if (s == 'Watch')         return 2;
+        if (s == 'Over cap')      return 3;
+        if (s == 'At risk')       return 2;
         if (s == 'Under-running') return 1;
         return 0; // On track
     }

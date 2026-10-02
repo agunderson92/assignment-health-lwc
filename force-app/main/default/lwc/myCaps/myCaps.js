@@ -1,11 +1,12 @@
-import { LightningElement, api, wire } from 'lwc';
+import { LightningElement, wire } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
-import getEngagementCaps from '@salesforce/apex/EngagementBurnController.getEngagementCaps';
+import getMyCaps from '@salesforce/apex/EngagementBurnController.getMyCaps';
 
 const COLUMNS = [
-    { label: 'Element', fieldName: 'elementName', wrapText: true, sortable: true },
-    { label: 'Activity', fieldName: 'activityName', wrapText: true, sortable: true,
+    { label: 'Account', fieldName: 'accountName', wrapText: true, sortable: true },
+    { label: 'Engagement', fieldName: 'engagementName', wrapText: true, sortable: true,
       cellAttributes: { class: { fieldName: 'statusClass' } } },
+    { label: 'Element', fieldName: 'elementName', wrapText: true, sortable: true },
     { label: 'Cap', fieldName: 'cap', type: 'currency', sortable: true,
       typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
     { label: 'Consumed', fieldName: 'consumed', type: 'currency', sortable: true,
@@ -20,11 +21,10 @@ const COLUMNS = [
       typeAttributes: { currencyCode: 'USD', maximumFractionDigits: 0 }, cellAttributes: { alignment: 'right' } },
     { label: 'Status', fieldName: 'status', sortable: true, cellAttributes: { class: { fieldName: 'statusClass' } } },
     { type: 'button-icon', fixedWidth: 40,
-      typeAttributes: { iconName: 'utility:new_window', title: 'Open activity in new tab', name: 'open', variant: 'bare' } }
+      typeAttributes: { iconName: 'utility:new_window', title: 'Open engagement in new tab', name: 'open', variant: 'bare' } }
 ];
 
-export default class EngagementCaps extends NavigationMixin(LightningElement) {
-    @api recordId;
+export default class MyCaps extends NavigationMixin(LightningElement) {
     columns = COLUMNS;
     rows;
     chartData = [];
@@ -34,7 +34,7 @@ export default class EngagementCaps extends NavigationMixin(LightningElement) {
     sortedBy = 'forecastPct';
     sortDirection = 'desc';
 
-    @wire(getEngagementCaps, { engagementId: '$recordId' })
+    @wire(getMyCaps)
     wired({ data, error }) {
         if (data) {
             const mapped = data.map((c) => ({ ...c, statusClass: this.statusClass(c.status) }));
@@ -51,7 +51,7 @@ export default class EngagementCaps extends NavigationMixin(LightningElement) {
             case 'Over cap': return 'slds-text-color_error';
             case 'At risk':  return 'slds-text-color_error';
             case 'On track': return 'slds-text-color_success';
-            default:         return 'slds-text-color_warning'; // Watch / Under-running
+            default:         return 'slds-text-color_warning'; // Under-running
         }
     }
 
@@ -62,10 +62,11 @@ export default class EngagementCaps extends NavigationMixin(LightningElement) {
     }
 
     handleRowAction(event) {
-        const id = event.detail.row.activityId;
+        const id = event.detail.row.engagementId;
+        if (!id) return;
         this[NavigationMixin.GenerateUrl]({
             type: 'standard__recordPage',
-            attributes: { recordId: id, objectApiName: 'KimbleOne__ResourcedActivity__c', actionName: 'view' }
+            attributes: { recordId: id, objectApiName: 'KimbleOne__DeliveryGroup__c', actionName: 'view' }
         }).then((url) => {
             window.open(url, '_blank');
         });
@@ -77,7 +78,7 @@ export default class EngagementCaps extends NavigationMixin(LightningElement) {
 }
 
 /**
- * Horizontal bar per element showing % of cap used (consumed / cap), color-coded:
+ * Horizontal bar per capped activity showing % of cap used (consumed / cap), color-coded:
  * green <= 50%, yellow 50-80%, red > 80%. Sorted highest-first.
  */
 function buildChart(rows) {
@@ -87,9 +88,12 @@ function buildChart(rows) {
         let cls = 'bar-fill bar-green';
         if (pct > 80) cls = 'bar-fill bar-red';
         else if (pct > 50) cls = 'bar-fill bar-yellow';
+        const label = r.engagementName || r.elementName || r.activityName;
+        const title = [r.accountName, r.engagementName, r.elementName].filter(Boolean).join(' · ');
         return {
             key: r.activityId,
-            label: r.elementName || r.activityName,
+            label,
+            title,
             pct,
             valueLabel: `${pct}%`,
             widthStyle: `width:${clamped}%;`,

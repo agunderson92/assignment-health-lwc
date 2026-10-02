@@ -1,6 +1,6 @@
 import { LightningElement } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
-import getEngagementsPage from '@salesforce/apex/EngagementBurnController.getEngagementsPage';
+import getPortfolioAll from '@salesforce/apex/EngagementBurnController.getPortfolioAll';
 
 const COLUMNS = [
     { label: 'Account', fieldName: 'accountName', wrapText: true, sortable: true },
@@ -28,19 +28,17 @@ const PAGE_SIZE = 20;
 
 export default class AllEngagementsBurn extends NavigationMixin(LightningElement) {
     columns = COLUMNS;
-    rows = [];
+    allRows = [];        // full, globally sorted result set
     error;
     loading = false;
 
     pageNumber = 1;
     pageSize = PAGE_SIZE;
-    totalCount = 0;
-    totalPages = 0;
 
     managerUserId = null;
     accountId = null;
 
-    // Default: highest revenue at risk first (applies within the current page)
+    // Default global sort: highest revenue at risk first
     sortedBy = 'revenueAtRisk';
     sortDirection = 'desc';
 
@@ -50,26 +48,19 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
 
     load() {
         this.loading = true;
-        getEngagementsPage({
-            managerUserId: this.managerUserId,
-            accountId: this.accountId,
-            pageSize: this.pageSize,
-            pageNumber: this.pageNumber
-        })
-            .then((res) => {
-                const mapped = (res.rows || []).map((e) => ({
+        getPortfolioAll({ managerUserId: this.managerUserId, accountId: this.accountId })
+            .then((data) => {
+                const mapped = (data || []).map((e) => ({
                     ...e,
                     statusClass: this.statusClass(e.status)
                 }));
-                this.rows = sortData(mapped, this.sortedBy, this.sortDirection);
-                this.totalCount = res.totalCount;
-                this.totalPages = res.totalPages;
-                this.pageNumber = res.pageNumber;
+                this.allRows = sortData(mapped, this.sortedBy, this.sortDirection);
+                this.pageNumber = 1;
                 this.error = undefined;
             })
             .catch((err) => {
                 this.error = err;
-                this.rows = [];
+                this.allRows = [];
             })
             .finally(() => {
                 this.loading = false;
@@ -84,44 +75,36 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
         }
     }
 
+    handleSort(event) {
+        this.sortedBy = event.detail.fieldName;
+        this.sortDirection = event.detail.sortDirection;
+        this.allRows = sortData(this.allRows, this.sortedBy, this.sortDirection);
+        this.pageNumber = 1;
+    }
+
     handleAccountChange(event) {
         this.accountId = event.detail.recordId || null;
-        this.pageNumber = 1;
         this.load();
     }
 
     handleManagerChange(event) {
         this.managerUserId = event.detail.recordId || null;
-        this.pageNumber = 1;
         this.load();
     }
 
     handleClear() {
         this.accountId = null;
         this.managerUserId = null;
-        this.pageNumber = 1;
         this.template.querySelectorAll('lightning-record-picker').forEach((p) => p.clearSelection());
         this.load();
     }
 
     handlePrev() {
-        if (this.pageNumber > 1) {
-            this.pageNumber -= 1;
-            this.load();
-        }
+        if (this.pageNumber > 1) this.pageNumber -= 1;
     }
 
     handleNext() {
-        if (this.pageNumber < this.totalPages) {
-            this.pageNumber += 1;
-            this.load();
-        }
-    }
-
-    handleSort(event) {
-        this.sortedBy = event.detail.fieldName;
-        this.sortDirection = event.detail.sortDirection;
-        this.rows = sortData(this.rows, this.sortedBy, this.sortDirection);
+        if (this.pageNumber < this.totalPages) this.pageNumber += 1;
     }
 
     handleRowAction(event) {
@@ -134,18 +117,17 @@ export default class AllEngagementsBurn extends NavigationMixin(LightningElement
         });
     }
 
-    get hasRows() {
-        return this.rows && this.rows.length > 0;
+    // Current page slice of the globally sorted set
+    get rows() {
+        const start = (this.pageNumber - 1) * this.pageSize;
+        return this.allRows.slice(start, start + this.pageSize);
     }
-    get showEmpty() {
-        return !this.loading && !this.error && (!this.rows || this.rows.length === 0);
-    }
-    get isFirstPage() {
-        return this.pageNumber <= 1;
-    }
-    get isLastPage() {
-        return this.pageNumber >= this.totalPages;
-    }
+    get totalCount() { return this.allRows.length; }
+    get totalPages() { return Math.max(1, Math.ceil(this.allRows.length / this.pageSize)); }
+    get hasRows() { return this.allRows.length > 0; }
+    get showEmpty() { return !this.loading && !this.error && this.allRows.length === 0; }
+    get isFirstPage() { return this.pageNumber <= 1; }
+    get isLastPage() { return this.pageNumber >= this.totalPages; }
     get pageLabel() {
         if (!this.totalCount) return 'No engagements';
         return `Page ${this.pageNumber} of ${this.totalPages} · ${this.totalCount} engagements`;

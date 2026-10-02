@@ -314,51 +314,36 @@ private class EngagementBurnControllerTest {
         System.assertNotEquals(null, portfolio, 'portfolio query returns a (possibly empty) list');
     }
 
-    // ===================== Leadership paged entry point =====================
+    // ===================== Leadership full-portfolio entry point =====================
 
     @isTest
-    static void page_emptyOrg_returnsZeroAndNormalizesParams() {
+    static void portfolioAll_emptyOrg_returnsEmpty() {
         Test.startTest();
-        // pageSize null -> default 20; pageNumber 0 -> clamped to 1
-        EngagementBurnController.PagedEngagements p =
-            EngagementBurnController.getEngagementsPage(null, null, null, 0);
+        List<EngagementBurnController.EngagementBurn> r =
+            EngagementBurnController.getPortfolioAll(null, null);
         Test.stopTest();
-
-        System.assertEquals(20, p.pageSize, 'null pageSize defaults to 20');
-        System.assertEquals(1, p.pageNumber, 'pageNumber < 1 clamps to 1');
-        System.assertEquals(0, p.totalCount, 'no active engagements in test context');
-        System.assertEquals(0, p.rows.size(), 'no rows');
+        System.assertNotEquals(null, r);
+        System.assertEquals(0, r.size(), 'no active engagements in test context');
     }
 
     @isTest
-    static void page_pageSizeIsCapped() {
-        Test.startTest();
-        EngagementBurnController.PagedEngagements p =
-            EngagementBurnController.getEngagementsPage(null, null, 999, 1);
-        Test.stopTest();
-        System.assertEquals(50, p.pageSize, 'oversized page size is capped at the max');
-    }
-
-    @isTest
-    static void page_accountFilter_buildsClauseAndReturnsEmpty() {
+    static void portfolioAll_accountFilter_buildsClauseAndReturnsEmpty() {
         Id fakeAccount = fakeId(Account.SObjectType);
         Test.startTest();
-        EngagementBurnController.PagedEngagements p =
-            EngagementBurnController.getEngagementsPage(null, fakeAccount, 20, 1);
+        List<EngagementBurnController.EngagementBurn> r =
+            EngagementBurnController.getPortfolioAll(null, fakeAccount);
         Test.stopTest();
-        System.assertEquals(0, p.totalCount);
-        System.assertEquals(0, p.rows.size());
+        System.assertEquals(0, r.size());
     }
 
     @isTest
-    static void page_managerFilter_noEngagementsShortCircuits() {
+    static void portfolioAll_managerFilter_noEngagementsShortCircuits() {
         Id fakeManager = fakeId(User.SObjectType);
         Test.startTest();
-        EngagementBurnController.PagedEngagements p =
-            EngagementBurnController.getEngagementsPage(fakeManager, null, 20, 1);
+        List<EngagementBurnController.EngagementBurn> r =
+            EngagementBurnController.getPortfolioAll(fakeManager, null);
         Test.stopTest();
-        System.assertEquals(0, p.totalCount, 'manager with no active engagements -> empty page');
-        System.assertEquals(0, p.totalPages);
+        System.assertEquals(0, r.size(), 'manager with no active engagements -> empty');
     }
 
     // ===================== Revenue-cap trending =====================
@@ -396,19 +381,18 @@ private class EngagementBurnControllerTest {
     @isTest
     static void classifyCap_allBands() {
         System.assertEquals('On track',      EngagementBurnController.classifyCap(null, 50, 50), 'no cap');
-        System.assertEquals('Over cap',      EngagementBurnController.classifyCap(100000, 130000, 40000), 'forecast > cap');
         System.assertEquals('Over cap',      EngagementBurnController.classifyCap(100000, 90000, 100000), 'already consumed the cap');
-        System.assertEquals('At risk',       EngagementBurnController.classifyCap(100000, 96000, 50000));
-        System.assertEquals('Watch',         EngagementBurnController.classifyCap(100000, 88000, 50000));
+        System.assertEquals('At risk',       EngagementBurnController.classifyCap(100000, 130000, 40000), 'projected to exceed the cap');
+        System.assertEquals('On track',      EngagementBurnController.classifyCap(100000, 100000, 50000), 'trending to exactly 100% is healthy, not at risk');
+        System.assertEquals('On track',      EngagementBurnController.classifyCap(100000, 96000, 50000), 'approaching but not exceeding');
         System.assertEquals('Under-running', EngagementBurnController.classifyCap(100000, 60000, 30000));
         System.assertEquals('On track',      EngagementBurnController.classifyCap(100000, 78000, 40000));
     }
 
     @isTest
     static void capSeverity_ordering() {
-        System.assertEquals(4, EngagementBurnController.capSev('Over cap'));
-        System.assertEquals(3, EngagementBurnController.capSev('At risk'));
-        System.assertEquals(2, EngagementBurnController.capSev('Watch'));
+        System.assertEquals(3, EngagementBurnController.capSev('Over cap'));
+        System.assertEquals(2, EngagementBurnController.capSev('At risk'));
         System.assertEquals(1, EngagementBurnController.capSev('Under-running'));
         System.assertEquals(0, EngagementBurnController.capSev('On track'));
     }
@@ -433,35 +417,44 @@ private class EngagementBurnControllerTest {
         System.assertEquals(98.0, c.forecastPct, 'forecast / cap');
         System.assertEquals(2000, c.headroom, 'cap - forecast');
         System.assertEquals(0, c.overage, 'not projected over');
-        System.assertEquals('At risk', c.status);
+        System.assertEquals('On track', c.status, 'forecast at 98% of cap is trending full, not at risk');
     }
 
     @isTest
-    static void buildCaps_overCapShowsOverage() {
+    static void buildCaps_projectedExceedIsAtRisk() {
         List<KimbleOne__ResourcedActivity__c> ras = new List<KimbleOne__ResourcedActivity__c>{
             mkRA(null, 'A', null, 'Eng', null, 'El', 100000, 50000, 0.5, 120000)
         };
         EngagementBurnController.ActivityCap c = EngagementBurnController.buildCaps(ras)[0];
-        System.assertEquals('Over cap', c.status);
+        System.assertEquals('At risk', c.status, 'forecast 120% of cap, cap not yet consumed');
         System.assertEquals(20000, c.overage, 'forecast - cap');
-        System.assertEquals(-20000, c.headroom, 'negative headroom = projected breach');
+        System.assertEquals(-20000, c.headroom, 'negative headroom = projected overage');
+    }
+
+    @isTest
+    static void buildCaps_alreadyConsumedIsOverCap() {
+        List<KimbleOne__ResourcedActivity__c> ras = new List<KimbleOne__ResourcedActivity__c>{
+            mkRA(null, 'A', null, 'Eng', null, 'El', 100000, 100000, 1.0, 100000)
+        };
+        EngagementBurnController.ActivityCap c = EngagementBurnController.buildCaps(ras)[0];
+        System.assertEquals('Over cap', c.status, 'cap already fully consumed');
     }
 
     @isTest
     static void capWorstFirst_sorts() {
-        EngagementBurnController.ActivityCap watch = new EngagementBurnController.ActivityCap();
-        watch.status = 'Watch'; watch.forecastPct = 88;
+        EngagementBurnController.ActivityCap atRisk = new EngagementBurnController.ActivityCap();
+        atRisk.status = 'At risk'; atRisk.forecastPct = 115;
         EngagementBurnController.ActivityCap over = new EngagementBurnController.ActivityCap();
         over.status = 'Over cap'; over.forecastPct = 120;
         List<EngagementBurnController.ActivityCap> l =
-            new List<EngagementBurnController.ActivityCap>{ watch, over };
+            new List<EngagementBurnController.ActivityCap>{ atRisk, over };
         l.sort(new EngagementBurnController.CapWorstFirst());
         System.assertEquals('Over cap', l[0].status, 'worst status first');
 
         EngagementBurnController.ActivityCap lo = new EngagementBurnController.ActivityCap();
-        lo.status = 'Watch'; lo.forecastPct = 86;
+        lo.status = 'On track'; lo.forecastPct = 86;
         EngagementBurnController.ActivityCap hi = new EngagementBurnController.ActivityCap();
-        hi.status = 'Watch'; hi.forecastPct = 90;
+        hi.status = 'On track'; hi.forecastPct = 90;
         List<EngagementBurnController.ActivityCap> l2 =
             new List<EngagementBurnController.ActivityCap>{ lo, hi };
         l2.sort(new EngagementBurnController.CapWorstFirst());
@@ -473,20 +466,21 @@ private class EngagementBurnControllerTest {
         Test.startTest();
         List<EngagementBurnController.ActivityCap> single =
             EngagementBurnController.getEngagementCaps(fakeId(KimbleOne__DeliveryGroup__c.SObjectType));
-        EngagementBurnController.PagedActivityCaps page =
-            EngagementBurnController.getActivityCapsPage(null, null, null, 0);
-        EngagementBurnController.PagedActivityCaps capped =
-            EngagementBurnController.getActivityCapsPage(null, null, 999, 1);
-        EngagementBurnController.PagedActivityCaps mgr =
-            EngagementBurnController.getActivityCapsPage(fakeId(User.SObjectType), null, 20, 1);
+        List<EngagementBurnController.ActivityCap> all =
+            EngagementBurnController.getAllActivityCaps(null, null);
+        List<EngagementBurnController.ActivityCap> byAccount =
+            EngagementBurnController.getAllActivityCaps(null, fakeId(Account.SObjectType));
+        List<EngagementBurnController.ActivityCap> byMgr =
+            EngagementBurnController.getAllActivityCaps(fakeId(User.SObjectType), null);
+        List<EngagementBurnController.ActivityCap> mine =
+            EngagementBurnController.getMyCaps();
         Test.stopTest();
 
         System.assertNotEquals(null, single);
         System.assertEquals(0, single.size());
-        System.assertEquals(20, page.pageSize, 'null size defaults to 20');
-        System.assertEquals(1, page.pageNumber, 'page 0 clamps to 1');
-        System.assertEquals(0, page.totalCount);
-        System.assertEquals(50, capped.pageSize, 'size capped at max');
-        System.assertEquals(0, mgr.totalCount, 'manager with no engagements short-circuits');
+        System.assertEquals(0, all.size());
+        System.assertEquals(0, byAccount.size());
+        System.assertEquals(0, byMgr.size(), 'manager with no engagements short-circuits');
+        System.assertNotEquals(null, mine);
     }
 }

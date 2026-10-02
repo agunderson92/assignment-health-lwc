@@ -1,0 +1,52 @@
+.chart-scroll {
+    max-height: 16rem;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+}
+
+.chart-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.chart-label {
+    flex: 0 0 14rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chart-track {
+    flex: 1 1 auto;
+    height: 0.9rem;
+    background-color: #ecebea;
+    border-radius: 0.25rem;
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    border-radius: 0.25rem;
+}
+
+.chart-value {
+    flex: 0 0 3.5rem;
+    text-align: right;
+    font-size: 0.8rem;
+}
+
+.bar-green  { background-color: #2e844a; }
+.bar-yellow { background-color: #fe9339; }
+.bar-red    { background-color: #ea001e; }
+
+.chart-legend .legend-swatch {
+    display: inline-block;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 2px;
+    margin: 0 0.2rem 0 0.7rem;
+    vertical-align: middle;
+}

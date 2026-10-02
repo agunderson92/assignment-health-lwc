@@ -1,18 +1,20 @@
 <template>
-    <lightning-card title="Revenue Caps" icon-name="utility:money">
+    <lightning-card title="My Caps — Revenue Cap Status" icon-name="utility:money">
         <div class="slds-p-horizontal_medium slds-p-bottom_medium">
             <template lwc:if={hasChart}>
                 <div class="slds-m-bottom_medium">
                     <p class="slds-text-title_caps slds-text-color_weak slds-m-bottom_x-small">% of cap used</p>
-                    <template for:each={chartData} for:item="b">
-                        <div key={b.key} class="chart-row">
-                            <span class="chart-label" title={b.label}>{b.label}</span>
-                            <div class="chart-track">
-                                <div class={b.barClass} style={b.widthStyle}></div>
+                    <div class="chart-scroll">
+                        <template for:each={chartData} for:item="b">
+                            <div key={b.key} class="chart-row">
+                                <span class="chart-label" title={b.title}>{b.label}</span>
+                                <div class="chart-track">
+                                    <div class={b.barClass} style={b.widthStyle}></div>
+                                </div>
+                                <span class="chart-value">{b.valueLabel}</span>
                             </div>
-                            <span class="chart-value">{b.valueLabel}</span>
-                        </div>
-                    </template>
+                        </template>
+                    </div>
                     <div class="chart-legend slds-text-body_small slds-text-color_weak slds-m-top_x-small">
                         <span class="legend-swatch bar-green"></span>&le; 50%
                         <span class="legend-swatch bar-yellow"></span>50&ndash;80%
@@ -34,17 +36,20 @@
                     column-widths-mode="auto">
                 </lightning-datatable>
                 <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
-                    Per capped activity (not netted to the engagement). Status is driven by forecast revenue vs the
-                    Usage Cap. Read-only.
+                    Capped activities on active engagements where you are Engagement Manager (owner or Delivery Actor),
+                    one row per capped activity. Status is driven by forecast revenue vs the Usage Cap. Read-only.
                 </p>
             </template>
 
             <template lwc:if={error}>
-                <p class="slds-text-color_error">Unable to load revenue caps.</p>
+                <p class="slds-text-color_error">Unable to load caps.</p>
             </template>
 
-            <template lwc:if={showEmpty}>
-                <p class="slds-text-body_regular slds-text-color_weak">No activities on this engagement have a revenue cap.</p>
+            <template lwc:if={rows}>
+                <template lwc:if={hasRows}></template>
+                <template lwc:else>
+                    <p class="slds-text-body_regular slds-text-color_weak">No capped activities on engagements you manage.</p>
+                </template>
             </template>
         </div>
     </lightning-card>

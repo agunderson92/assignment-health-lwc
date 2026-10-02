@@ -12,22 +12,33 @@ starting point, not production-ready — see "Before production" below.
 - `classes/EngagementBurnController.cls` — read-only Apex. Three `@AuraEnabled(cacheable=true)` methods:
   - `getEngagementBurn(engagementId)` → one engagement + its assignment detail (for the record page).
   - `getMyPortfolio()` → the logged-in user's active engagements where they are EM, worst-first (rollup).
-  - `getEngagementsPage(managerUserId, accountId, pageSize, pageNumber)` → **all** active engagements, optionally filtered by manager and/or account, one page at a time (leadership view). Returns a `PagedEngagements` wrapper (`rows`, `totalCount`, `totalPages`, `pageNumber`, `pageSize`).
+  - `getPortfolioAll(managerUserId, accountId)` → **all** active engagements, optionally filtered by manager and/or account, fully computed and returned worst-first (leadership view). The client sorts and paginates.
 - `lwc/engagementBurnPanel/` — drops on the **Engagement (`KimbleOne__DeliveryGroup__c`) record page**. Shows the burn-to-date + projection table for that engagement.
 - `lwc/myPortfolioBurn/` — drops on the **Home page** (or an App page). Shows the EM's active engagements, worst-first, each row navigates to the engagement.
-- `lwc/allEngagementsBurn/` — drops on a **Home or App page for leadership**. Shows all active engagements with Account + Manager columns, filterable by Account and Engagement Manager (`lightning-record-picker`), paginated (20/page). Each row navigates to the engagement.
-- `lwc/capBurndown/` — **leadership Home/App page**. Revenue-cap trending: one row per Resourced Activity that has a Usage Cap, filterable/paged/sortable, worst-first. Consumed $ and forecast $ vs the cap, with projected overage and a cap status.
-- `lwc/engagementCaps/` — **Engagement record page**. The same cap trending scoped to the engagement being viewed (one row per capped activity on that engagement).
+- `lwc/allEngagementsBurn/` — drops on a **Home or App page for leadership**. Shows all active engagements with Account + Manager columns, filterable by Account and Engagement Manager (`lightning-record-picker`), sorted globally and paginated 20/page client-side. Each row navigates to the engagement.
+- `lwc/capBurndown/` — **leadership Home/App page**. Revenue-cap trending: one row per Resourced Activity that has a Usage Cap, filterable, globally sorted, paginated. Consumed $ and forecast $ vs the cap, with projected overage and a cap status. Includes the same color-coded **"% of cap used" bar chart** across the full filtered set (scrollable).
+- `lwc/engagementCaps/` — **Engagement record page**. The same cap trending scoped to the engagement being viewed, plus a color-coded **"% of cap used" bar chart** (one bar per element: green ≤ 50%, yellow 50–80%, red > 80%).
+- `lwc/myCaps/` — **Home page** (or App page). Capped activities on the logged-in user's active engagements where they are EM (owner or Delivery Actor) — the cap analogue of `myPortfolioBurn`. Includes the same color-coded **"% of cap used" bar chart**.
 
-Sorting & navigation (all datatable widgets): columns are sortable (default sort = revenue at risk / % of cap, highest first; nulls last), and the row arrow opens the target record in a **new browser tab**. In the paged leadership widgets, client-side sort acts on the current page only.
+Sorting & navigation (all datatable widgets): columns are sortable (default sort = revenue at risk / % of cap, highest first; nulls last), and the row arrow opens the target record in a **new browser tab**. The leadership widgets fetch the full filtered result set once and sort + paginate **client-side**, so ordering is global across all pages (not per-page) and paging / re-sorting is instant.
 
-### Revenue caps (`getEngagementCaps`, `getActivityCapsPage`)
+### Revenue caps (`getEngagementCaps`, `getAllActivityCaps`, `getMyCaps`)
 
-The Usage Cap (`KimbleOne__UsageRevenueCap__c`) lives on the **Resourced Activity**, one cap per activity, and an engagement can have several. Cap trending is kept at **activity grain and never rolled up to the engagement** — aggregating would net a low-forecasting element against an over-forecasting one and hide the risk. Kimble already stores the actuals (`KimbleOne__ActualRevenue__c`, `KimbleOne__ActualUsageRevenueToCapFactor__c`) and forecast (`KimbleOne__ForecastP3Revenue__c`), so no revenue is recomputed from hours. Status is driven by **forecast ÷ cap**: `Over cap` (> 100% or already consumed), `At risk` (≥ 95%), `Watch` (≥ 85%), `Under-running` (< 70%), else `On track` — thresholds are constants (`CAP_ATRISK_PCT`, `CAP_WATCH_PCT`, `CAP_UNDER_PCT`), tune with Delivery Ops. Note: `ForecastP3Revenue` is total activity revenue; for activities with material expense revenue it slightly overstates the usage-cap comparison — refine with a usage-specific forecast field if that becomes an issue.
+The Usage Cap (`KimbleOne__UsageRevenueCap__c`) lives on the **Resourced Activity**, one cap per activity, and an engagement can have several. Cap trending is kept at **activity grain and never rolled up to the engagement** — aggregating would net a low-forecasting element against an over-forecasting one and hide the risk. Kimble already stores the actuals (`KimbleOne__ActualRevenue__c`, `KimbleOne__ActualUsageRevenueToCapFactor__c`) and forecast (`KimbleOne__ForecastP3Revenue__c`), so no revenue is recomputed from hours.
 
-### Leadership paging / ordering design
+Status (a forecast trending *up to* 100% of the cap is healthy; only a forecast that projects to **exceed** it is a risk):
+- **Over cap** — the cap is already fully consumed (consumed ≥ 100%).
+- **At risk** — forecast projects to **exceed** the cap (forecast > 100%, cap not yet consumed).
+- **Under-running** — forecast < `CAP_UNDER_PCT` (70%) of the cap (leaving cap unspent).
+- **On track** — forecast is 70–100% of the cap.
 
-`getEngagementsPage` computes burn **only for the engagements on the requested page**, so cost stays bounded no matter how many active engagements exist org-wide (this business runs hundreds of small T&E engagements). The trade-off: rows are ordered by soonest expected end date at the SOQL level (stable, pageable) and only the returned page is sorted worst-first — so a globally worst-first ranking across *all* pages is **not** available in this synchronous design (that would require computing every engagement's burn up front). Narrow with the Account / Manager filters to focus. A future enhancement could pre-rank via a scheduled/cached job if global worst-first ordering is needed. `OFFSET` is capped at 2000 (SOQL limit) — deep paging past that returns empty; filter instead.
+Note: `ForecastP3Revenue` is total activity revenue; for activities with material expense revenue it slightly overstates the usage-cap comparison — refine with a usage-specific forecast field if that becomes an issue. The `engagementCaps` chart colors bars by **% of cap *used*** (consumed ÷ cap): green ≤ 50%, yellow 50–80%, red > 80% — a separate visual scale from the status above.
+
+### Leadership sorting / scale design
+
+The leadership widgets need a **global** sort (correct ordering across every page, not just the visible one), which means every matching row must be computed before sorting. `getPortfolioAll` therefore computes the whole filtered active set and returns it in one cacheable call; the LWC sorts and paginates client-side, so re-sorting and paging are instant and always global.
+
+To keep the server call within the synchronous heap limit (~6 MB), engagements are computed in **chunks** of `ENGAGEMENT_CHUNK` (50): each chunk's assignment rows fall out of scope before the next chunk loads, so peak heap stays bounded even across the full org-wide active set (~500 engagements / ~5–6k assignments measured). `getAllActivityCaps` needs no chunking — capped activities are a small subset (dozens) and read straight from queryable fields. If the active-engagement volume grows by an order of magnitude, revisit this (e.g. move the compute to a scheduled job that caches per-engagement burn, then query/sort that).
 
 ## How it maps to the methodology
 

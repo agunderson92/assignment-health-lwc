@@ -1,6 +1,6 @@
 import { LightningElement } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
-import getActivityCapsPage from '@salesforce/apex/EngagementBurnController.getActivityCapsPage';
+import getAllActivityCaps from '@salesforce/apex/EngagementBurnController.getAllActivityCaps';
 
 const COLUMNS = [
     { label: 'Account', fieldName: 'accountName', wrapText: true, sortable: true },
@@ -28,19 +28,18 @@ const PAGE_SIZE = 20;
 
 export default class CapBurndown extends NavigationMixin(LightningElement) {
     columns = COLUMNS;
-    rows = [];
+    allRows = [];        // full, globally sorted result set
+    chartData = [];      // % of cap used, one bar per capped activity (full filtered set)
     error;
     loading = false;
 
     pageNumber = 1;
     pageSize = PAGE_SIZE;
-    totalCount = 0;
-    totalPages = 0;
 
     managerUserId = null;
     accountId = null;
 
-    // Default: highest projected % of cap first (applies within the current page)
+    // Default global sort: highest projected % of cap first
     sortedBy = 'forecastPct';
     sortDirection = 'desc';
 
@@ -50,26 +49,21 @@ export default class CapBurndown extends NavigationMixin(LightningElement) {
 
     load() {
         this.loading = true;
-        getActivityCapsPage({
-            managerUserId: this.managerUserId,
-            accountId: this.accountId,
-            pageSize: this.pageSize,
-            pageNumber: this.pageNumber
-        })
-            .then((res) => {
-                const mapped = (res.rows || []).map((c) => ({
+        getAllActivityCaps({ managerUserId: this.managerUserId, accountId: this.accountId })
+            .then((data) => {
+                const mapped = (data || []).map((c) => ({
                     ...c,
                     statusClass: this.statusClass(c.status)
                 }));
-                this.rows = sortData(mapped, this.sortedBy, this.sortDirection);
-                this.totalCount = res.totalCount;
-                this.totalPages = res.totalPages;
-                this.pageNumber = res.pageNumber;
+                this.allRows = sortData(mapped, this.sortedBy, this.sortDirection);
+                this.chartData = buildChart(mapped);
+                this.pageNumber = 1;
                 this.error = undefined;
             })
             .catch((err) => {
                 this.error = err;
-                this.rows = [];
+                this.allRows = [];
+                this.chartData = [];
             })
             .finally(() => {
                 this.loading = false;
@@ -78,51 +72,43 @@ export default class CapBurndown extends NavigationMixin(LightningElement) {
 
     statusClass(status) {
         switch (status) {
-            case 'Over cap':      return 'slds-text-color_error';
-            case 'At risk':       return 'slds-text-color_error';
-            case 'On track':      return 'slds-text-color_success';
-            default:              return 'slds-text-color_warning'; // Watch / Under-running
+            case 'Over cap': return 'slds-text-color_error';
+            case 'At risk':  return 'slds-text-color_error';
+            case 'On track': return 'slds-text-color_success';
+            default:         return 'slds-text-color_warning'; // Watch / Under-running
         }
     }
 
     handleSort(event) {
         this.sortedBy = event.detail.fieldName;
         this.sortDirection = event.detail.sortDirection;
-        this.rows = sortData(this.rows, this.sortedBy, this.sortDirection);
+        this.allRows = sortData(this.allRows, this.sortedBy, this.sortDirection);
+        this.pageNumber = 1;
     }
 
     handleAccountChange(event) {
         this.accountId = event.detail.recordId || null;
-        this.pageNumber = 1;
         this.load();
     }
 
     handleManagerChange(event) {
         this.managerUserId = event.detail.recordId || null;
-        this.pageNumber = 1;
         this.load();
     }
 
     handleClear() {
         this.accountId = null;
         this.managerUserId = null;
-        this.pageNumber = 1;
         this.template.querySelectorAll('lightning-record-picker').forEach((p) => p.clearSelection());
         this.load();
     }
 
     handlePrev() {
-        if (this.pageNumber > 1) {
-            this.pageNumber -= 1;
-            this.load();
-        }
+        if (this.pageNumber > 1) this.pageNumber -= 1;
     }
 
     handleNext() {
-        if (this.pageNumber < this.totalPages) {
-            this.pageNumber += 1;
-            this.load();
-        }
+        if (this.pageNumber < this.totalPages) this.pageNumber += 1;
     }
 
     handleRowAction(event) {
@@ -136,18 +122,17 @@ export default class CapBurndown extends NavigationMixin(LightningElement) {
         });
     }
 
-    get hasRows() {
-        return this.rows && this.rows.length > 0;
+    get rows() {
+        const start = (this.pageNumber - 1) * this.pageSize;
+        return this.allRows.slice(start, start + this.pageSize);
     }
-    get showEmpty() {
-        return !this.loading && !this.error && (!this.rows || this.rows.length === 0);
-    }
-    get isFirstPage() {
-        return this.pageNumber <= 1;
-    }
-    get isLastPage() {
-        return this.pageNumber >= this.totalPages;
-    }
+    get totalCount() { return this.allRows.length; }
+    get totalPages() { return Math.max(1, Math.ceil(this.allRows.length / this.pageSize)); }
+    get hasRows() { return this.allRows.length > 0; }
+    get hasChart() { return this.chartData && this.chartData.length > 0; }
+    get showEmpty() { return !this.loading && !this.error && this.allRows.length === 0; }
+    get isFirstPage() { return this.pageNumber <= 1; }
+    get isLastPage() { return this.pageNumber >= this.totalPages; }
     get pageLabel() {
         if (!this.totalCount) return 'No capped activities';
         return `Page ${this.pageNumber} of ${this.totalPages} · ${this.totalCount} capped activities`;
@@ -170,4 +155,31 @@ function sortData(rows, field, direction) {
         return 0;
     });
     return cloned;
+}
+
+/**
+ * Horizontal bar per capped activity showing % of cap used (consumed / cap), color-coded:
+ * green <= 50%, yellow 50-80%, red > 80%. Sorted highest-first; spans the full filtered set.
+ */
+function buildChart(rows) {
+    const bars = rows.map((r) => {
+        const pct = r.consumedPct == null ? 0 : r.consumedPct;
+        const clamped = Math.max(0, Math.min(pct, 100));
+        let cls = 'bar-fill bar-green';
+        if (pct > 80) cls = 'bar-fill bar-red';
+        else if (pct > 50) cls = 'bar-fill bar-yellow';
+        const label = r.engagementName || r.elementName || r.activityName;
+        const title = [r.accountName, r.engagementName, r.elementName].filter(Boolean).join(' · ');
+        return {
+            key: r.activityId,
+            label,
+            title,
+            pct,
+            valueLabel: `${pct}%`,
+            widthStyle: `width:${clamped}%;`,
+            barClass: cls
+        };
+    });
+    bars.sort((a, b) => b.pct - a.pct);
+    return bars;
 }
